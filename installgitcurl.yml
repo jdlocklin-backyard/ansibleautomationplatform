@@ -4,6 +4,10 @@
   become: true
 
   tasks:
+    - name: Check OS version
+      ansible.builtin.debug:
+        msg: "OS Version is {{ ansible_distribution }} {{ ansible_distribution_version }}"
+
     - name: Update apt package list
       ansible.builtin.apt:
         update_cache: yes
