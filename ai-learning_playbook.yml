@@ -1,0 +1,109 @@
+---
+# Playbook: Learning Ansible Automation Platform
+#
+# Description: This playbook is designed for beginners to understand the basic
+# concepts and functionality of Ansible and Ansible Automation Platform (AAP).
+# Each section and task includes comments to explain what it does and why.
+
+- name: My First Ansible Playbook for Learning
+  # 'hosts' defines which servers or devices this playbook will run against.
+  # 'all' means it will run on all hosts defined in your inventory.
+  # In AAP, the inventory is managed within the platform itself.
+  hosts: all
+
+  # 'become: true' tells Ansible to escalate privileges (e.g., to 'root' using sudo)
+  # for the tasks in this play. This is often necessary for system-level changes.
+  become: true
+
+  # 'gather_facts: true' is the default. Ansible will connect to the target hosts
+  # and gather a lot of information (facts) about them, like OS, IP address, memory, etc.
+  # These facts can be used as variables in your playbook.
+  gather_facts: true
+
+  # The 'vars' section allows you to define variables that can be used throughout this play.
+  # Variables make playbooks more dynamic and reusable.
+  vars:
+    learning_message: "Hello from Ansible! We are learning about variables."
+    packages_to_check:
+      - git
+      - curl
+      - htop # A useful process viewer
+
+  # The 'tasks' section is a list of actions that Ansible will execute in order.
+  tasks:
+    # --- Task 1: Simple Connectivity Test ---
+    - name: 1. Test connectivity to the host
+      # The 'ansible.builtin.ping' module is a simple way to check if Ansible
+      # can connect to the host and if Python is available. It doesn't use ICMP ping.
+      # A successful response is 'pong'.
+      ansible.builtin.ping:
+
+    # --- Task 2: Using Facts ---
+    - name: 2. Display the OS distribution of the target host
+      # The 'ansible.builtin.debug' module is great for printing variable values.
+      # Here, we are printing a "fact" that Ansible gathered automatically.
+      # 'ansible_distribution' is a variable holding the OS name (e.g., Ubuntu, CentOS).
+      ansible.builtin.debug:
+        msg: "The operating system is: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+
+    # --- Task 3: Using Variables ---
+    - name: 3. Display our custom variable
+      # This task uses the 'learning_message' variable we defined in the 'vars' section.
+      ansible.builtin.debug:
+        msg: "{{ learning_message }}"
+
+    # --- Task 4: Running a Shell Command ---
+    - name: 4. Check the system uptime
+      # The 'ansible.builtin.command' module executes a command on the target host.
+      # It's simple but doesn't provide as much integration as dedicated modules.
+      # Note: This module is not processed through the shell, so things like pipes and
+      # redirects will not work. Use 'ansible.builtin.shell' for that.
+      ansible.builtin.command:
+        cmd: uptime
+      # 'register' saves the output of the task into a new variable, here called 'uptime_result'.
+      register: uptime_result
+      # 'changed_when: false' tells Ansible that this command doesn't change the system's state.
+      # This is good practice for read-only commands.
+      changed_when: false
+
+    # --- Task 5: Using Registered Variables ---
+    - name: 5. Display the uptime result
+      # Now we print the standard output from the previous command.
+      # The registered variable 'uptime_result' is a dictionary containing various details.
+      # 'stdout' contains the command's output.
+      ansible.builtin.debug:
+        msg: "System uptime is: {{ uptime_result.stdout }}"
+
+    # --- Task 6: Using a Loop and a Conditional ---
+    - name: 6. Check if common packages are installed (on Debian/Ubuntu)
+      # This task uses the 'ansible.builtin.package_facts' module to get information
+      # about installed packages.
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: 7. Report on the status of our list of packages
+      # The 'loop' keyword iterates over a list. In this case, it's the
+      # 'packages_to_check' variable we defined earlier.
+      # In each iteration, the current item from the list is available as 'item'.
+      ansible.builtin.debug:
+        msg: >
+          Package '{{ item }}' is
+          {% if item in ansible_facts.packages %}
+          INSTALLED (Version: {{ ansible_facts.packages[item][0].version }})
+          {% else %}
+          NOT INSTALLED
+          {% endif %}
+      loop: "{{ packages_to_check }}"
+
+    # --- Task 8: A Conditional Task ---
+    - name: 8. Run this task ONLY on Ubuntu systems
+      # The 'when' keyword provides a condition. The task will only run if the
+      # condition is true. Here, we check the 'ansible_distribution' fact.
+      ansible.builtin.debug:
+        msg: "This is an Ubuntu machine, so this task is running!"
+      when: ansible_distribution == 'Ubuntu'
+
+    # --- End of Playbook ---
+    - name: End of the learning playbook
+      ansible.builtin.debug:
+        msg: "Congratulations! You have completed the learning playbook."
