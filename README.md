@@ -9,6 +9,9 @@ git clone https://github.com/jdlocklin-backyard/ansibleautomationplatform.git
 git pull origin main
 
 # After making changes
+
 git add .
+
 git commit -m "Your message"
+
 git push origin main
