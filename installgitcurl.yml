@@ -39,3 +39,20 @@
     - name: Print curl version
       ansible.builtin.debug:
         msg: "Curl version: {{ curl_version.stdout }}"
+
+    - name: Ping the server
+      ping:
+
+    - name: Get system information
+      setup:
+      register: system_info
+
+    - name: Display connection success
+      debug:
+        msg: 
+          - "✓ SSH connection successful!"
+          - "Connected to: {{ inventory_hostname }}"
+          - "User: {{ ansible_user }}"
+          - "OS: {{ system_info.ansible_facts.ansible_distribution }} {{ system_info.ansible_facts.ansible_distribution_version }}"
+          - "Hostname: {{ system_info.ansible_facts.ansible_hostname }}"
+
