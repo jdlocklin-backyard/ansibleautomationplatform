@@ -1,6 +1,6 @@
 ---
 - name: Install git and curl on Ubuntu servers
-  hosts: garden_servers
+  hosts: myhosts
   become: true
   vars:
     openai_key: "{{ lookup('env', 'OPENAI_API_KEY') }}"
