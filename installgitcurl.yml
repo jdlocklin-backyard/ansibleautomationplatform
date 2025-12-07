@@ -2,6 +2,9 @@
 - name: Install git and curl on Ubuntu servers
   hosts: myhosts
   become: true
+    vars:
+    openai_key: "{{ lookup('env', 'OPENAI_API_KEY') }}"
+    # garden project key
 
   tasks:
     - name: Check OS version
@@ -59,10 +62,7 @@
 
 # The Challenge: Passing secrets securely
 # We expect you to pass the API key when running the playbook
-  vars:
-    openai_key: "{{ lookup('env', 'OPENAI_API_KEY') }}"
 
-  tasks:
     - name: 1. Create the project directory
       file:
         path: /opt/garden-agent
