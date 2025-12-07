@@ -56,3 +56,44 @@
           - "OS: {{ system_info.ansible_facts.ansible_distribution }} {{ system_info.ansible_facts.ansible_distribution_version }}"
           - "Hostname: {{ system_info.ansible_facts.ansible_hostname }}"
 
+
+# The Challenge: Passing secrets securely
+# We expect you to pass the API key when running the playbook
+  vars:
+    openai_key: "{{ lookup('env', 'OPENAI_API_KEY') }}"
+
+  tasks:
+    - name: 1. Create the project directory
+      file:
+        path: /opt/garden-agent
+        state: directory
+        mode: '0755'
+
+    - name: 2. Copy the agent files to the server
+      copy:
+        src: "{{ item }}"
+        dest: /opt/garden-agent/
+        mode: '0644'
+      loop:
+        - main.py
+        - Dockerfile
+        - docker-compose.yml
+
+    - name: 3. Create the .env file on the server (Templating)
+      # We create the file manually here to inject the key from your laptop
+      copy:
+        dest: /opt/garden-agent/.env
+        content: |
+          OPENAI_API_KEY={{ openai_key }}
+
+    - name: 4. Tear down existing containers (Clean Slate)
+      command: docker-compose down
+      args:
+        chdir: /opt/garden-agent
+      ignore_errors: yes # Don't fail if it's the first time running
+
+    - name: 5. Build and Start the Agent
+      command: docker-compose up -d --build
+      args:
+        chdir: /opt/garden-agent
+
