@@ -1,0 +1,352 @@
+---
+# =============================================================================
+# PLAYBOOK 09: Handlers - Smart Service Restarts
+# =============================================================================
+# WHAT YOU'LL LEARN:
+#   - What handlers are and why they're useful
+#   - The 'notify' and 'handlers' keywords
+#   - Handler execution order and deduplication
+#   - Flushing handlers with meta
+#   - Listen feature for multiple triggers
+#
+# REAL-WORLD USE: Restart Apache only when config actually changes!
+#
+# RUN THIS PLAYBOOK:
+#   ansible-playbook educational/09_handlers.yml
+# =============================================================================
+
+- name: Handlers - Event-Driven Actions
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    config_dir: "/tmp/ansible-handlers"
+    app_config_version: "1.0"
+
+  # ===========================================================================
+  # HANDLERS SECTION
+  # ===========================================================================
+  # Handlers are special tasks that only run when "notified"
+  # They run ONCE at the END of the play, even if notified multiple times
+  handlers:
+
+    # -------------------------------------------------------------------------
+    # HANDLER 1: Simple restart handler
+    # -------------------------------------------------------------------------
+    - name: Restart application
+      ansible.builtin.debug:
+        msg: ">>> HANDLER: Restarting application service..."
+      # In real use, this would be:
+      # ansible.builtin.service:
+      #   name: myapp
+      #   state: restarted
+
+    # -------------------------------------------------------------------------
+    # HANDLER 2: Reload handler (lighter than restart)
+    # -------------------------------------------------------------------------
+    - name: Reload application config
+      ansible.builtin.debug:
+        msg: ">>> HANDLER: Reloading application configuration..."
+      # ansible.builtin.service:
+      #   name: myapp
+      #   state: reloaded
+
+    # -------------------------------------------------------------------------
+    # HANDLER 3: Clear cache handler
+    # -------------------------------------------------------------------------
+    - name: Clear application cache
+      ansible.builtin.debug:
+        msg: ">>> HANDLER: Clearing application cache..."
+      # ansible.builtin.file:
+      #   path: /var/cache/myapp
+      #   state: absent
+
+    # -------------------------------------------------------------------------
+    # HANDLER 4: Multiple handlers with 'listen'
+    # -------------------------------------------------------------------------
+    # 'listen' allows multiple handlers to respond to the same event
+    - name: Send deployment notification
+      ansible.builtin.debug:
+        msg: ">>> HANDLER: Sending deployment notification..."
+      listen: "deploy complete"
+
+    - name: Update monitoring dashboard
+      ansible.builtin.debug:
+        msg: ">>> HANDLER: Updating monitoring dashboard..."
+      listen: "deploy complete"
+
+    - name: Write deployment log
+      ansible.builtin.debug:
+        msg: ">>> HANDLER: Writing deployment log entry..."
+      listen: "deploy complete"
+
+  tasks:
+
+    # =========================================================================
+    # SETUP
+    # =========================================================================
+    - name: Create config directory
+      ansible.builtin.file:
+        path: "{{ config_dir }}"
+        state: directory
+        mode: '0755'
+
+    # =========================================================================
+    # UNDERSTANDING HANDLERS
+    # =========================================================================
+    - name: Explain handlers concept
+      ansible.builtin.debug:
+        msg: |
+          WHAT ARE HANDLERS?
+          =================
+
+          Handlers are tasks that only run when triggered by 'notify'.
+
+          WHY USE HANDLERS?
+          - Avoid unnecessary service restarts
+          - Run cleanup only when needed
+          - Keep idempotency (if nothing changed, no restart)
+
+          WHEN HANDLERS RUN:
+          - At the END of all tasks in a play
+          - Only ONCE, even if notified multiple times
+          - Only if the notifying task actually CHANGED something
+
+          EXAMPLE: Apache config
+          - If config file unchanged: Apache keeps running
+          - If config file changed: Apache restarts ONCE at end
+
+    # =========================================================================
+    # BASIC NOTIFY EXAMPLE
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 1: Task that triggers a handler
+    # -------------------------------------------------------------------------
+    - name: Update application config file
+      ansible.builtin.copy:
+        content: |
+          # Application Configuration
+          version = {{ app_config_version }}
+          debug = true
+        dest: "{{ config_dir }}/app.conf"
+        mode: '0644'
+      # 'notify' triggers handler(s) when this task CHANGES something
+      notify: Restart application
+      # FIRST RUN: Creates file -> handler runs
+      # SECOND RUN: File unchanged -> handler does NOT run
+
+    # -------------------------------------------------------------------------
+    # TASK 2: Multiple notifies from one task
+    # -------------------------------------------------------------------------
+    - name: Update critical config
+      ansible.builtin.copy:
+        content: |
+          # Critical Settings
+          max_connections = 100
+          timeout = 30
+        dest: "{{ config_dir }}/critical.conf"
+        mode: '0644'
+      # Can notify multiple handlers
+      notify:
+        - Restart application
+        - Clear application cache
+
+    # =========================================================================
+    # HANDLER DEDUPLICATION
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 3: Handler only runs once even if notified multiple times
+    # -------------------------------------------------------------------------
+    - name: Update database config
+      ansible.builtin.copy:
+        content: "host=localhost\nport=5432"
+        dest: "{{ config_dir }}/database.conf"
+        mode: '0644'
+      notify: Restart application
+      # Even though 3 tasks notify "Restart application",
+      # it only runs ONCE at the end!
+
+    - name: Update cache config
+      ansible.builtin.copy:
+        content: "cache_size=1024"
+        dest: "{{ config_dir }}/cache.conf"
+        mode: '0644'
+      notify: Restart application
+
+    # =========================================================================
+    # USING LISTEN FOR GROUPED HANDLERS
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 4: Trigger multiple handlers with one notify
+    # -------------------------------------------------------------------------
+    - name: Deploy new application version
+      ansible.builtin.copy:
+        content: |
+          # Deployed by Ansible
+          version = 2.0.0
+          timestamp = 2024-01-15
+        dest: "{{ config_dir }}/deployment.conf"
+        mode: '0644'
+      # This triggers ALL handlers with 'listen: deploy complete'
+      notify: "deploy complete"
+      # RESULT: All 3 "deploy complete" handlers run
+
+    # =========================================================================
+    # FORCE HANDLER EXECUTION WITH META
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 5: Flush handlers mid-play
+    # -------------------------------------------------------------------------
+    - name: Explain flush_handlers
+      ansible.builtin.debug:
+        msg: |
+          FLUSH HANDLERS:
+          ==============
+          Normally handlers run at END of play.
+          Sometimes you need them to run IMMEDIATELY.
+
+          Use meta: flush_handlers to run pending handlers NOW.
+
+          Use case: You update config, need restart, then check status
+
+    - name: Update monitoring config
+      ansible.builtin.copy:
+        content: "monitoring_enabled=true"
+        dest: "{{ config_dir }}/monitoring.conf"
+        mode: '0644'
+      notify: Reload application config
+
+    - name: Flush handlers NOW (run pending handlers immediately)
+      ansible.builtin.meta: flush_handlers
+      # All pending handlers execute HERE, not at end of play
+
+    - name: Verify config was reloaded
+      ansible.builtin.debug:
+        msg: "Handler has already run - we can now verify the reload worked"
+
+    # =========================================================================
+    # HANDLERS AND FAILED TASKS
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 6: Handlers and failures
+    # -------------------------------------------------------------------------
+    - name: Explain handler behavior with failures
+      ansible.builtin.debug:
+        msg: |
+          HANDLER FAILURE BEHAVIOR:
+          ========================
+
+          By default: If a task fails, handlers DON'T run!
+
+          To always run handlers (even if task fails):
+            ansible-playbook playbook.yml --force-handlers
+
+          Or in playbook:
+            force_handlers: true
+
+          CAUTION: Be careful with force-handlers in production!
+
+    # =========================================================================
+    # PRACTICAL EXAMPLES
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 7: Realistic Apache example
+    # -------------------------------------------------------------------------
+    - name: Show realistic handler usage
+      ansible.builtin.debug:
+        msg: |
+          REAL-WORLD EXAMPLE (like your apache.yml):
+          ==========================================
+
+          tasks:
+            - name: Install Apache
+              ansible.builtin.apt:
+                name: apache2
+                state: present
+
+            - name: Copy Apache config
+              ansible.builtin.copy:
+                src: httpd.conf
+                dest: /etc/apache2/apache2.conf
+              notify: Restart Apache     # <-- Only if changed!
+
+            - name: Copy virtual host
+              ansible.builtin.template:
+                src: vhost.conf.j2
+                dest: /etc/apache2/sites-available/mysite.conf
+              notify: Restart Apache     # <-- Same handler
+
+            - name: Enable site
+              ansible.builtin.command: a2ensite mysite.conf
+              notify: Restart Apache     # <-- Same handler
+
+          handlers:
+            - name: Restart Apache
+              ansible.builtin.service:
+                name: apache2
+                state: restarted
+
+          RESULT: Apache restarts only ONCE, only if something changed!
+
+    # -------------------------------------------------------------------------
+    # TASK 8: Handler chain example
+    # -------------------------------------------------------------------------
+    - name: Show handler chaining
+      ansible.builtin.debug:
+        msg: |
+          HANDLER CHAINS:
+          ==============
+          Handlers can notify other handlers!
+
+          handlers:
+            - name: Restart nginx
+              ansible.builtin.service:
+                name: nginx
+                state: restarted
+              notify: Verify nginx status
+
+            - name: Verify nginx status
+              ansible.builtin.command: nginx -t
+              register: nginx_test
+
+          This creates a chain: restart -> verify
+
+    # =========================================================================
+    # SUMMARY
+    # =========================================================================
+    - name: List config files created
+      ansible.builtin.find:
+        paths: "{{ config_dir }}"
+        patterns: "*.conf"
+      register: config_files
+
+    - name: Lesson Summary
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  HANDLERS COMPLETE"
+          - "============================================"
+          - ""
+          - "CONFIG FILES: {{ config_files.files | length }}"
+          - ""
+          - "KEY CONCEPTS LEARNED:"
+          - "  - notify: trigger handler on change"
+          - "  - handlers: define response actions"
+          - "  - Deduplication: handler runs once"
+          - "  - listen: group multiple handlers"
+          - "  - meta: flush_handlers - run immediately"
+          - "  - --force-handlers: run on failure"
+          - ""
+          - "WATCH THE OUTPUT ABOVE:"
+          - "  Notice handlers ran at END of play!"
+          - "  Each handler ran only ONCE despite"
+          - "  being notified multiple times."
+          - ""
+          - "NEXT: Try 10_docker_basics.yml"

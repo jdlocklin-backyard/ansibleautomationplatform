@@ -1,0 +1,412 @@
+---
+# =============================================================================
+# PLAYBOOK 11: Firewall Rules - Securing Your Servers
+# =============================================================================
+# WHAT YOU'LL LEARN:
+#   - Managing UFW (Uncomplicated Firewall) on Ubuntu
+#   - Opening/closing ports
+#   - Allowing specific IPs
+#   - Rate limiting and logging
+#   - Basic firewalld concepts (RHEL/CentOS)
+#
+# IMPORTANT: Run with care! Wrong rules can lock you out!
+#
+# RUN THIS PLAYBOOK:
+#   ansible-playbook educational/11_firewall_rules.yml --check  (dry run!)
+#   ansible-playbook educational/11_firewall_rules.yml
+# =============================================================================
+
+- name: Firewall Rules - Network Security
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    # Ports your applications use
+    allowed_ports:
+      - { port: 22, proto: tcp, comment: "SSH" }
+      - { port: 80, proto: tcp, comment: "HTTP" }
+      - { port: 443, proto: tcp, comment: "HTTPS" }
+      - { port: 8080, proto: tcp, comment: "Application" }
+
+    # Trusted IP addresses (example)
+    trusted_ips:
+      - "192.168.1.0/24"    # Local network
+      - "10.0.0.0/8"        # Private network
+
+    # Your web server port (like garden-agent)
+    app_port: 8080
+
+  tasks:
+
+    # =========================================================================
+    # UNDERSTANDING FIREWALLS
+    # =========================================================================
+    - name: Explain firewall concepts
+      ansible.builtin.debug:
+        msg: |
+          FIREWALL BASICS:
+          ================
+
+          Firewalls control network traffic:
+          - ALLOW: Permit traffic on port/IP
+          - DENY: Block traffic
+          - LIMIT: Rate-limit connections (anti-brute-force)
+
+          Common Linux firewalls:
+          - UFW: Ubuntu/Debian (simple)
+          - firewalld: RHEL/CentOS (zone-based)
+          - iptables: Low-level (complex)
+
+          GOLDEN RULE: Always allow SSH first!
+          Otherwise you'll lock yourself out.
+
+    # =========================================================================
+    # UFW (UBUNTU FIREWALL)
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 1: Check if UFW is available
+    # -------------------------------------------------------------------------
+    - name: Check UFW availability
+      ansible.builtin.command: which ufw
+      register: ufw_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: UFW status
+      ansible.builtin.debug:
+        msg: "UFW is {{ 'available' if ufw_check.rc == 0 else 'NOT installed' }}"
+
+    # -------------------------------------------------------------------------
+    # TASK 2: Install UFW if needed
+    # -------------------------------------------------------------------------
+    - name: Explain UFW installation
+      ansible.builtin.debug:
+        msg: |
+          INSTALLING UFW:
+          ===============
+
+          - name: Install UFW
+            ansible.builtin.apt:
+              name: ufw
+              state: present
+            when: ansible_os_family == "Debian"
+
+    # -------------------------------------------------------------------------
+    # TASK 3: Basic UFW rules
+    # -------------------------------------------------------------------------
+    - name: Show basic UFW rules
+      ansible.builtin.debug:
+        msg: |
+          BASIC UFW RULES:
+          ================
+
+          # CRITICAL: Always allow SSH first!
+          - name: Allow SSH
+            community.general.ufw:
+              rule: allow
+              port: '22'
+              proto: tcp
+
+          # Allow HTTP
+          - name: Allow HTTP
+            community.general.ufw:
+              rule: allow
+              port: '80'
+              proto: tcp
+
+          # Allow HTTPS
+          - name: Allow HTTPS
+            community.general.ufw:
+              rule: allow
+              port: '443'
+              proto: tcp
+
+          # Enable UFW (with default deny)
+          - name: Enable UFW
+            community.general.ufw:
+              state: enabled
+              default: deny
+              direction: incoming
+
+    # -------------------------------------------------------------------------
+    # TASK 4: Allow application port (like garden-agent)
+    # -------------------------------------------------------------------------
+    - name: Show application port rule
+      ansible.builtin.debug:
+        msg: |
+          ALLOWING APP PORT (like garden-agent on 8080):
+          ==============================================
+
+          - name: Allow application port
+            community.general.ufw:
+              rule: allow
+              port: '{{ app_port }}'   # 8080
+              proto: tcp
+              comment: "Garden Agent application"
+
+          This allows external access to your containerized app!
+
+    # -------------------------------------------------------------------------
+    # TASK 5: Loop over multiple ports
+    # -------------------------------------------------------------------------
+    - name: Show multi-port configuration
+      ansible.builtin.debug:
+        msg: |
+          MULTIPLE PORTS WITH LOOP:
+          =========================
+
+          - name: Allow standard ports
+            community.general.ufw:
+              rule: allow
+              port: '{{ item.port }}'
+              proto: '{{ item.proto }}'
+              comment: '{{ item.comment }}'
+            loop:
+              - { port: 22, proto: tcp, comment: "SSH" }
+              - { port: 80, proto: tcp, comment: "HTTP" }
+              - { port: 443, proto: tcp, comment: "HTTPS" }
+              - { port: 8080, proto: tcp, comment: "Application" }
+
+    # =========================================================================
+    # ADVANCED UFW RULES
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 6: Allow from specific IP
+    # -------------------------------------------------------------------------
+    - name: Show IP-based rules
+      ansible.builtin.debug:
+        msg: |
+          IP-BASED RULES:
+          ===============
+
+          # Allow from specific IP
+          - name: Allow SSH from office IP
+            community.general.ufw:
+              rule: allow
+              from_ip: 203.0.113.50
+              port: '22'
+              proto: tcp
+
+          # Allow from subnet
+          - name: Allow from local network
+            community.general.ufw:
+              rule: allow
+              from_ip: 192.168.1.0/24
+              comment: "Local network access"
+
+          # Deny specific IP
+          - name: Block suspicious IP
+            community.general.ufw:
+              rule: deny
+              from_ip: 10.20.30.40
+              comment: "Blocked - suspicious activity"
+
+    # -------------------------------------------------------------------------
+    # TASK 7: Rate limiting (anti-brute-force)
+    # -------------------------------------------------------------------------
+    - name: Show rate limiting
+      ansible.builtin.debug:
+        msg: |
+          RATE LIMITING:
+          ==============
+
+          # Limit SSH connection attempts (prevents brute-force)
+          - name: Rate limit SSH
+            community.general.ufw:
+              rule: limit
+              port: '22'
+              proto: tcp
+
+          This blocks IPs that attempt more than 6 connections
+          in 30 seconds. Essential for SSH security!
+
+    # -------------------------------------------------------------------------
+    # TASK 8: Port ranges
+    # -------------------------------------------------------------------------
+    - name: Show port ranges
+      ansible.builtin.debug:
+        msg: |
+          PORT RANGES:
+          ============
+
+          # Allow port range
+          - name: Allow high ports for FTP
+            community.general.ufw:
+              rule: allow
+              port: 49152:65535
+              proto: tcp
+              comment: "FTP passive ports"
+
+          # Allow multiple specific ports
+          - name: Allow web ports
+            community.general.ufw:
+              rule: allow
+              port: '80,443,8080'
+              proto: tcp
+
+    # =========================================================================
+    # UFW DEFAULT POLICIES
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 9: Setting defaults
+    # -------------------------------------------------------------------------
+    - name: Show default policies
+      ansible.builtin.debug:
+        msg: |
+          DEFAULT POLICIES:
+          =================
+
+          # Set default to deny incoming, allow outgoing
+          - name: Set UFW defaults
+            community.general.ufw:
+              state: enabled
+              default: deny           # Default for incoming
+              direction: incoming
+
+          - name: Allow all outgoing
+            community.general.ufw:
+              default: allow
+              direction: outgoing
+
+          BEST PRACTICE:
+          - Deny incoming by default
+          - Allow outgoing by default
+          - Explicitly allow needed incoming ports
+
+    # =========================================================================
+    # FIREWALLD (RHEL/CentOS)
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 10: Firewalld basics
+    # -------------------------------------------------------------------------
+    - name: Show firewalld concepts
+      ansible.builtin.debug:
+        msg: |
+          FIREWALLD (RHEL/CentOS):
+          ========================
+
+          Firewalld uses ZONES instead of simple allow/deny.
+
+          # Allow HTTP in public zone
+          - name: Allow HTTP
+            ansible.posix.firewalld:
+              service: http
+              zone: public
+              permanent: true
+              state: enabled
+
+          # Allow custom port
+          - name: Allow app port
+            ansible.posix.firewalld:
+              port: 8080/tcp
+              zone: public
+              permanent: true
+              state: enabled
+
+          # Reload firewall
+          - name: Reload firewalld
+            ansible.builtin.service:
+              name: firewalld
+              state: reloaded
+
+          ZONES: public, internal, dmz, trusted, drop
+
+    # =========================================================================
+    # PRACTICAL EXAMPLE: GARDEN-AGENT FIREWALL
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 11: Complete firewall setup for garden-agent
+    # -------------------------------------------------------------------------
+    - name: Show complete firewall setup
+      ansible.builtin.debug:
+        msg: |
+          GARDEN-AGENT FIREWALL SETUP:
+          ============================
+
+          - name: Reset UFW to defaults
+            community.general.ufw:
+              state: reset
+            when: reset_firewall | default(false)
+
+          - name: Allow SSH (ALWAYS FIRST!)
+            community.general.ufw:
+              rule: limit         # Rate-limited for security
+              port: '22'
+              proto: tcp
+              comment: "SSH access"
+
+          - name: Allow HTTP/HTTPS for web access
+            community.general.ufw:
+              rule: allow
+              port: '{{ item }}'
+              proto: tcp
+            loop:
+              - '80'
+              - '443'
+
+          - name: Allow garden-agent port
+            community.general.ufw:
+              rule: allow
+              port: '8080'        # Your app port
+              proto: tcp
+              comment: "Garden Agent API"
+
+          - name: Enable UFW with deny default
+            community.general.ufw:
+              state: enabled
+              default: deny
+              direction: incoming
+              logging: 'on'       # Enable logging
+
+    # =========================================================================
+    # VERIFICATION
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 12: Check current firewall status
+    # -------------------------------------------------------------------------
+    - name: Get firewall status (if UFW available)
+      ansible.builtin.command: ufw status verbose
+      register: ufw_status
+      ignore_errors: true
+      changed_when: false
+      when: ufw_check.rc == 0
+
+    - name: Show UFW status
+      ansible.builtin.debug:
+        msg: "{{ ufw_status.stdout_lines }}"
+      when: ufw_check.rc == 0 and ufw_status.rc == 0
+
+    # =========================================================================
+    # SUMMARY
+    # =========================================================================
+    - name: Lesson Summary
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  FIREWALL RULES COMPLETE"
+          - "============================================"
+          - ""
+          - "KEY CONCEPTS LEARNED:"
+          - "  - community.general.ufw: Ubuntu firewall"
+          - "  - ansible.posix.firewalld: RHEL firewall"
+          - "  - rule: allow, deny, limit, reject"
+          - "  - Rate limiting for SSH security"
+          - "  - IP-based access control"
+          - "  - Default policies (deny incoming)"
+          - ""
+          - "SECURITY BEST PRACTICES:"
+          - "  1. ALWAYS allow SSH first!"
+          - "  2. Use rate limiting on SSH"
+          - "  3. Default deny incoming"
+          - "  4. Test with --check first"
+          - "  5. Have console access as backup"
+          - ""
+          - "NEXT: Try 12_cron_jobs.yml"

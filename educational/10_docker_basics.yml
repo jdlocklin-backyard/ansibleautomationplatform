@@ -1,0 +1,457 @@
+---
+# =============================================================================
+# PLAYBOOK 10: Docker Basics - Container Management with Ansible
+# =============================================================================
+# WHAT YOU'LL LEARN:
+#   - Installing Docker with Ansible
+#   - Managing Docker containers
+#   - Building and running images
+#   - Docker Compose with Ansible
+#   - Docker networks and volumes
+#
+# REAL-WORLD USE: Exactly like your garden-agent deployment!
+#
+# PREREQUISITES: Docker installed (or run the install tasks)
+#
+# RUN THIS PLAYBOOK:
+#   ansible-playbook educational/10_docker_basics.yml
+# =============================================================================
+
+- name: Docker Basics - Container Automation
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  vars:
+    # Project directory (like your garden-agent)
+    docker_project_dir: "/tmp/ansible-docker-demo"
+
+    # Container settings
+    container_name: "ansible-demo-app"
+    image_name: "ansible-demo"
+    image_tag: "latest"
+
+    # Application settings
+    app_port: 8080
+    environment_vars:
+      APP_NAME: "Demo Application"
+      DEBUG: "true"
+      LOG_LEVEL: "INFO"
+
+  tasks:
+
+    # =========================================================================
+    # UNDERSTANDING DOCKER + ANSIBLE
+    # =========================================================================
+    - name: Explain Docker automation
+      ansible.builtin.debug:
+        msg: |
+          DOCKER + ANSIBLE:
+          =================
+
+          Ansible can fully automate Docker workflows:
+          - Install Docker itself
+          - Build images from Dockerfiles
+          - Run/stop/restart containers
+          - Manage networks and volumes
+          - Use Docker Compose
+
+          YOUR PROJECT CONNECTION:
+          Your installgitcurl.yml uses this exact pattern
+          for the garden-agent project!
+
+    # =========================================================================
+    # DOCKER INSTALLATION (Reference)
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 1: Install Docker prerequisites (Debian/Ubuntu)
+    # -------------------------------------------------------------------------
+    - name: Show Docker installation steps
+      ansible.builtin.debug:
+        msg: |
+          INSTALLING DOCKER (for reference):
+          ==================================
+
+          # 1. Install prerequisites
+          - name: Install Docker prerequisites
+            ansible.builtin.apt:
+              name:
+                - apt-transport-https
+                - ca-certificates
+                - curl
+                - gnupg
+              state: present
+
+          # 2. Add Docker GPG key
+          - name: Add Docker GPG key
+            ansible.builtin.apt_key:
+              url: https://download.docker.com/linux/ubuntu/gpg
+              state: present
+
+          # 3. Add Docker repository
+          - name: Add Docker repo
+            ansible.builtin.apt_repository:
+              repo: deb https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
+              state: present
+
+          # 4. Install Docker
+          - name: Install Docker CE
+            ansible.builtin.apt:
+              name: docker-ce
+              state: present
+              update_cache: true
+
+          # 5. Start Docker service
+          - name: Start Docker
+            ansible.builtin.service:
+              name: docker
+              state: started
+              enabled: true
+
+    # =========================================================================
+    # SETUP PROJECT STRUCTURE
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 2: Create project directory
+    # -------------------------------------------------------------------------
+    - name: Create Docker project directory
+      ansible.builtin.file:
+        path: "{{ docker_project_dir }}"
+        state: directory
+        mode: '0755'
+      # This is like: mkdir /opt/garden-agent
+
+    # -------------------------------------------------------------------------
+    # TASK 3: Create a sample Python app
+    # -------------------------------------------------------------------------
+    - name: Create sample application
+      ansible.builtin.copy:
+        content: |
+          #!/usr/bin/env python3
+          """Simple Flask application for Docker demo."""
+          import os
+          from flask import Flask
+
+          app = Flask(__name__)
+
+          @app.route('/')
+          def hello():
+              app_name = os.environ.get('APP_NAME', 'Demo')
+              return f'Hello from {app_name}!'
+
+          @app.route('/health')
+          def health():
+              return 'OK', 200
+
+          if __name__ == '__main__':
+              app.run(host='0.0.0.0', port=8080)
+        dest: "{{ docker_project_dir }}/app.py"
+        mode: '0644'
+      # Similar to copying main.py for garden-agent
+
+    # -------------------------------------------------------------------------
+    # TASK 4: Create Dockerfile
+    # -------------------------------------------------------------------------
+    - name: Create Dockerfile
+      ansible.builtin.copy:
+        content: |
+          # Dockerfile for demo application
+          FROM python:3.11-slim
+
+          # Set working directory
+          WORKDIR /app
+
+          # Install dependencies
+          RUN pip install flask
+
+          # Copy application
+          COPY app.py .
+
+          # Expose port
+          EXPOSE 8080
+
+          # Run application
+          CMD ["python", "app.py"]
+        dest: "{{ docker_project_dir }}/Dockerfile"
+        mode: '0644'
+      # Just like your garden-agent Dockerfile!
+
+    # -------------------------------------------------------------------------
+    # TASK 5: Create docker-compose.yml
+    # -------------------------------------------------------------------------
+    - name: Create docker-compose.yml
+      ansible.builtin.copy:
+        content: |
+          # Docker Compose for demo application
+          version: '3.8'
+
+          services:
+            app:
+              build: .
+              container_name: {{ container_name }}
+              ports:
+                - "{{ app_port }}:8080"
+              environment:
+          {% for key, value in environment_vars.items() %}
+                - {{ key }}={{ value }}
+          {% endfor %}
+              restart: unless-stopped
+              healthcheck:
+                test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+                interval: 30s
+                timeout: 10s
+                retries: 3
+        dest: "{{ docker_project_dir }}/docker-compose.yml"
+        mode: '0644'
+      # This matches your garden-agent docker-compose.yml pattern!
+
+    # =========================================================================
+    # DOCKER CONTAINER MANAGEMENT
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 6: Using community.docker.docker_container
+    # -------------------------------------------------------------------------
+    - name: Explain docker_container module
+      ansible.builtin.debug:
+        msg: |
+          DOCKER_CONTAINER MODULE:
+          ========================
+
+          # Pull and run a container
+          - name: Run nginx container
+            community.docker.docker_container:
+              name: my-nginx
+              image: nginx:latest
+              state: started           # started, stopped, absent, present
+              ports:
+                - "80:80"
+              volumes:
+                - "/data:/usr/share/nginx/html:ro"
+              env:
+                NGINX_HOST: "example.com"
+              restart_policy: unless-stopped
+
+          STATES:
+          - started: run container (pull if needed)
+          - stopped: stop running container
+          - absent: remove container completely
+          - present: create but don't start
+
+    # -------------------------------------------------------------------------
+    # TASK 7: Docker image management
+    # -------------------------------------------------------------------------
+    - name: Explain docker_image module
+      ansible.builtin.debug:
+        msg: |
+          DOCKER_IMAGE MODULE:
+          ====================
+
+          # Pull an image
+          - name: Pull Python image
+            community.docker.docker_image:
+              name: python
+              tag: 3.11-slim
+              source: pull
+
+          # Build from Dockerfile
+          - name: Build custom image
+            community.docker.docker_image:
+              name: my-app
+              tag: "{{ version }}"
+              source: build
+              build:
+                path: /opt/my-app    # Directory with Dockerfile
+                pull: true           # Pull base image first
+              state: present
+
+    # =========================================================================
+    # DOCKER COMPOSE WITH ANSIBLE
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 8: Using docker_compose module (your pattern!)
+    # -------------------------------------------------------------------------
+    - name: Explain docker_compose with Ansible
+      ansible.builtin.debug:
+        msg: |
+          DOCKER COMPOSE WITH ANSIBLE:
+          ============================
+
+          Option 1: Command module (your current approach)
+          ------------------------------------------------
+          - name: Tear down existing containers
+            ansible.builtin.command: docker-compose down
+            args:
+              chdir: /opt/garden-agent
+            ignore_errors: true
+
+          - name: Build and start containers
+            ansible.builtin.command: docker-compose up -d --build
+            args:
+              chdir: /opt/garden-agent
+
+          Option 2: community.docker.docker_compose module
+          -------------------------------------------------
+          - name: Start services with docker_compose
+            community.docker.docker_compose:
+              project_src: /opt/garden-agent
+              state: present         # present, absent
+              build: true            # Build images
+              pull: true             # Pull latest base images
+              recreate: smart        # Recreate if config changed
+
+          Both approaches work! Command is simpler,
+          module gives more control and idempotency.
+
+    # -------------------------------------------------------------------------
+    # TASK 9: Show the garden-agent deployment pattern
+    # -------------------------------------------------------------------------
+    - name: Your garden-agent deployment pattern
+      ansible.builtin.debug:
+        msg: |
+          YOUR GARDEN-AGENT DEPLOYMENT:
+          =============================
+
+          From installgitcurl.yml:
+
+          - name: Create the project directory
+            ansible.builtin.file:
+              path: /opt/garden-agent
+              state: directory
+              mode: '0755'
+
+          - name: Copy the agent files to the server
+            ansible.builtin.copy:
+              src: "{{ item }}"
+              dest: /opt/garden-agent/
+              mode: '0644'
+            loop:
+              - main.py
+              - Dockerfile
+              - docker-compose.yml
+
+          - name: Create the .env file (with secrets!)
+            ansible.builtin.copy:
+              dest: /opt/garden-agent/.env
+              content: |
+                OPENAI_API_KEY={{ openai_key }}
+
+          - name: Tear down existing containers
+            ansible.builtin.command: docker-compose down
+            args:
+              chdir: /opt/garden-agent
+            ignore_errors: true
+
+          - name: Build and Start the Agent
+            ansible.builtin.command: docker-compose up -d --build
+            args:
+              chdir: /opt/garden-agent
+
+          This is a solid pattern for container deployment!
+
+    # =========================================================================
+    # DOCKER NETWORKS AND VOLUMES
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 10: Docker networks
+    # -------------------------------------------------------------------------
+    - name: Explain docker_network module
+      ansible.builtin.debug:
+        msg: |
+          DOCKER NETWORKS:
+          ================
+
+          - name: Create app network
+            community.docker.docker_network:
+              name: app-network
+              driver: bridge         # bridge, overlay, host
+              state: present
+
+          - name: Run container on network
+            community.docker.docker_container:
+              name: my-app
+              image: my-app:latest
+              networks:
+                - name: app-network
+
+          Use networks to isolate containers
+          and enable secure communication.
+
+    # -------------------------------------------------------------------------
+    # TASK 11: Docker volumes
+    # -------------------------------------------------------------------------
+    - name: Explain docker_volume module
+      ansible.builtin.debug:
+        msg: |
+          DOCKER VOLUMES:
+          ===============
+
+          - name: Create data volume
+            community.docker.docker_volume:
+              name: app-data
+              state: present
+
+          - name: Run container with volume
+            community.docker.docker_container:
+              name: my-database
+              image: postgres:15
+              volumes:
+                - "app-data:/var/lib/postgresql/data"
+              env:
+                POSTGRES_PASSWORD: secret
+
+          Volumes persist data beyond container lifetime.
+
+    # =========================================================================
+    # PRACTICAL: CHECK DOCKER STATUS
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 12: Check if Docker is available
+    # -------------------------------------------------------------------------
+    - name: Check Docker availability
+      ansible.builtin.command: docker --version
+      register: docker_version
+      ignore_errors: true
+      changed_when: false
+
+    - name: Show Docker status
+      ansible.builtin.debug:
+        msg: "{{ docker_version.stdout | default('Docker not installed') }}"
+
+    # =========================================================================
+    # SUMMARY
+    # =========================================================================
+    - name: List project files
+      ansible.builtin.find:
+        paths: "{{ docker_project_dir }}"
+        patterns: "*"
+      register: project_files
+
+    - name: Lesson Summary
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  DOCKER BASICS COMPLETE"
+          - "============================================"
+          - ""
+          - "PROJECT FILES CREATED:"
+          - "{% for f in project_files.files %}  - {{ f.path | basename }}"
+          - "{% endfor %}"
+          - ""
+          - "KEY CONCEPTS LEARNED:"
+          - "  - docker_container: run/stop containers"
+          - "  - docker_image: build/pull images"
+          - "  - docker_compose: orchestrate services"
+          - "  - docker_network: container networking"
+          - "  - docker_volume: persistent storage"
+          - ""
+          - "YOUR PROJECT CONNECTION:"
+          - "  This is EXACTLY what your garden-agent"
+          - "  deployment does! Now you understand it fully."
+          - ""
+          - "NEXT: Try 11_firewall_rules.yml"

@@ -1,0 +1,336 @@
+---
+# =============================================================================
+# PLAYBOOK 07: Conditionals - Making Decisions with 'when'
+# =============================================================================
+# WHAT YOU'LL LEARN:
+#   - The 'when' statement for conditional execution
+#   - Comparing values (==, !=, <, >, in)
+#   - Combining conditions (and, or, not)
+#   - Using facts in conditions
+#   - Conditional expressions with Jinja2
+#
+# REAL-WORLD USE: Like your multiOSupdate.yml - different tasks per OS!
+#
+# RUN THIS PLAYBOOK:
+#   ansible-playbook educational/07_conditionals.yml
+# =============================================================================
+
+- name: Conditionals - Making Smart Decisions
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  vars:
+    # Test variables for our conditions
+    app_version: "2.5"
+    min_version: "2.0"
+    max_version: "3.0"
+
+    # Boolean flags
+    maintenance_mode: false
+    feature_flag: true
+
+    # Environment setting
+    environment: "development"
+
+    # List of allowed environments
+    valid_environments:
+      - development
+      - staging
+      - production
+
+    # Server configuration
+    server:
+      role: webserver
+      memory_gb: 8
+      cpu_cores: 4
+
+    # Empty and non-empty lists for testing
+    active_users:
+      - alice
+      - bob
+    inactive_users: []
+
+  tasks:
+
+    # =========================================================================
+    # BASIC COMPARISON OPERATORS
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 1: Equal to (==)
+    # -------------------------------------------------------------------------
+    - name: Check if environment is development
+      ansible.builtin.debug:
+        msg: "Running in DEVELOPMENT mode - extra logging enabled"
+      # 'when' determines if this task runs
+      # Task only runs if condition is True
+      when: environment == "development"
+
+    # -------------------------------------------------------------------------
+    # TASK 2: Not equal to (!=)
+    # -------------------------------------------------------------------------
+    - name: Skip if in production
+      ansible.builtin.debug:
+        msg: "This is a non-production environment"
+      when: environment != "production"
+
+    # -------------------------------------------------------------------------
+    # TASK 3: Greater than / Less than
+    # -------------------------------------------------------------------------
+    - name: Check server memory requirements
+      ansible.builtin.debug:
+        msg: "Server has {{ server.memory_gb }}GB RAM - meets minimum (4GB)"
+      when: server.memory_gb >= 4
+
+    - name: Warn if low CPU cores
+      ansible.builtin.debug:
+        msg: "WARNING: Only {{ server.cpu_cores }} CPU cores"
+      when: server.cpu_cores < 2
+
+    # =========================================================================
+    # BOOLEAN CONDITIONS
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 4: Boolean True/False
+    # -------------------------------------------------------------------------
+    - name: Check if feature is enabled
+      ansible.builtin.debug:
+        msg: "Feature flag is ENABLED"
+      # For booleans, just use the variable name directly
+      when: feature_flag
+      # Same as: when: feature_flag == true
+
+    - name: Check if maintenance mode is OFF
+      ansible.builtin.debug:
+        msg: "System is operational (not in maintenance)"
+      # 'not' negates a boolean
+      when: not maintenance_mode
+
+    # =========================================================================
+    # COMBINING CONDITIONS
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 5: AND conditions (all must be true)
+    # -------------------------------------------------------------------------
+    - name: Check multiple conditions with AND
+      ansible.builtin.debug:
+        msg: "Development mode with feature enabled - testing new feature!"
+      # Both conditions must be True
+      when: environment == "development" and feature_flag
+
+    # Alternative syntax using list (also means AND):
+    - name: AND conditions using list format
+      ansible.builtin.debug:
+        msg: "Server meets all requirements"
+      when:
+        - server.memory_gb >= 4
+        - server.cpu_cores >= 2
+        - server.role == "webserver"
+      # This is cleaner for multiple conditions
+
+    # -------------------------------------------------------------------------
+    # TASK 6: OR conditions (any can be true)
+    # -------------------------------------------------------------------------
+    - name: Check OR conditions
+      ansible.builtin.debug:
+        msg: "This is either dev or staging environment"
+      when: environment == "development" or environment == "staging"
+
+    # -------------------------------------------------------------------------
+    # TASK 7: Complex nested conditions
+    # -------------------------------------------------------------------------
+    - name: Complex condition with parentheses
+      ansible.builtin.debug:
+        msg: "Production-ready or test override active"
+      when: >
+        (environment == "production" and not maintenance_mode)
+        or
+        (environment == "development" and feature_flag)
+      # Use parentheses to group conditions
+
+    # =========================================================================
+    # THE 'in' OPERATOR
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 8: Check if value is in a list
+    # -------------------------------------------------------------------------
+    - name: Validate environment is allowed
+      ansible.builtin.debug:
+        msg: "Environment '{{ environment }}' is valid"
+      # 'in' checks if value exists in list
+      when: environment in valid_environments
+
+    - name: Check for specific role
+      ansible.builtin.debug:
+        msg: "This is a web or app server"
+      when: server.role in ['webserver', 'appserver', 'apiserver']
+
+    # =========================================================================
+    # CHECKING VARIABLES AND LISTS
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 9: Check if variable is defined
+    # -------------------------------------------------------------------------
+    - name: Check if variable exists
+      ansible.builtin.debug:
+        msg: "Environment variable is defined"
+      when: environment is defined
+
+    - name: Check if variable is undefined
+      ansible.builtin.debug:
+        msg: "Optional setting not configured"
+      when: optional_setting is not defined
+
+    # -------------------------------------------------------------------------
+    # TASK 10: Check if list is empty
+    # -------------------------------------------------------------------------
+    - name: Process if list has items
+      ansible.builtin.debug:
+        msg: "Active users: {{ active_users | join(', ') }}"
+      # Check list length
+      when: active_users | length > 0
+
+    - name: Skip if list is empty
+      ansible.builtin.debug:
+        msg: "No inactive users to process"
+      when: inactive_users | length == 0
+
+    # =========================================================================
+    # USING FACTS IN CONDITIONS
+    # =========================================================================
+    # This is exactly how your multiOSupdate.yml works!
+
+    # -------------------------------------------------------------------------
+    # TASK 11: OS-specific conditions
+    # -------------------------------------------------------------------------
+    - name: Display OS information
+      ansible.builtin.debug:
+        msg: |
+          Operating System: {{ ansible_distribution }}
+          Version: {{ ansible_distribution_version }}
+          Family: {{ ansible_os_family }}
+
+    - name: Ubuntu-specific task
+      ansible.builtin.debug:
+        msg: "This would run APT commands on Ubuntu"
+      # Your multiOSupdate.yml uses this exact pattern!
+      when: ansible_distribution == "Ubuntu"
+
+    - name: Debian family task (Ubuntu, Debian, etc.)
+      ansible.builtin.debug:
+        msg: "This runs on any Debian-based system"
+      when: ansible_os_family == "Debian"
+
+    - name: RHEL/CentOS task
+      ansible.builtin.debug:
+        msg: "This would run YUM/DNF commands on Red Hat"
+      when: ansible_os_family == "RedHat"
+
+    - name: Windows task
+      ansible.builtin.debug:
+        msg: "This would run on Windows systems"
+      when: ansible_os_family == "Windows"
+
+    # -------------------------------------------------------------------------
+    # TASK 12: Version comparison
+    # -------------------------------------------------------------------------
+    - name: Check distribution version
+      ansible.builtin.debug:
+        msg: "Running on Ubuntu 20.04 or newer"
+      when:
+        - ansible_distribution == "Ubuntu"
+        - ansible_distribution_version is version('20.04', '>=')
+      # 'is version()' test for comparing versions
+
+    # =========================================================================
+    # CONDITIONAL WITH REGISTERED VARIABLES
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 13: Using registered output
+    # -------------------------------------------------------------------------
+    - name: Check if a command succeeded
+      ansible.builtin.command:
+        cmd: which git
+      register: git_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: Report git status
+      ansible.builtin.debug:
+        msg: "Git is installed at {{ git_check.stdout }}"
+      # 'rc' is the return code (0 = success)
+      when: git_check.rc == 0
+
+    - name: Git not found
+      ansible.builtin.debug:
+        msg: "Git is not installed"
+      when: git_check.rc != 0
+
+    # =========================================================================
+    # ADVANCED: TESTING STRINGS
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 14: String tests
+    # -------------------------------------------------------------------------
+    - name: Check if string matches pattern
+      ansible.builtin.debug:
+        msg: "Environment starts with 'dev'"
+      when: environment is match("^dev.*")
+      # 'is match()' uses regex
+
+    - name: Check if string contains text
+      ansible.builtin.debug:
+        msg: "This is a server role"
+      when: "'server' in server.role"
+
+    # =========================================================================
+    # CONDITIONAL BLOCKS
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 15: Apply condition to multiple tasks with block
+    # -------------------------------------------------------------------------
+    - name: Development-only tasks
+      # 'block' groups multiple tasks
+      block:
+        - name: Dev - Enable debug logging
+          ansible.builtin.debug:
+            msg: "Debug logging enabled"
+
+        - name: Dev - Skip SSL verification
+          ansible.builtin.debug:
+            msg: "SSL verification disabled for development"
+      # 'when' applies to entire block
+      when: environment == "development"
+
+    # =========================================================================
+    # SUMMARY
+    # =========================================================================
+    - name: Lesson Summary
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  CONDITIONALS COMPLETE"
+          - "============================================"
+          - ""
+          - "KEY CONCEPTS LEARNED:"
+          - "  - when: basic conditional execution"
+          - "  - Operators: ==, !=, <, >, >=, <="
+          - "  - Boolean: and, or, not"
+          - "  - in: check list membership"
+          - "  - is defined/undefined: variable checks"
+          - "  - is version(): compare versions"
+          - "  - block: apply condition to many tasks"
+          - ""
+          - "YOUR PROJECT CONNECTION:"
+          - "  Your multiOSupdate.yml uses conditionals to"
+          - "  run different tasks for Windows/Ubuntu/Arch!"
+          - ""
+          - "NEXT: Try 08_loops.yml"

@@ -1,0 +1,242 @@
+---
+# =============================================================================
+# PLAYBOOK 05: Service Control - Managing System Services
+# =============================================================================
+# WHAT YOU'LL LEARN:
+#   - Starting and stopping services with 'service' module
+#   - The 'systemd' module for systemd-specific features
+#   - Enabling services to start on boot
+#   - Reloading vs restarting services
+#   - Checking service status
+#
+# REAL-WORLD USE: Like your apache.yml - managing httpd service!
+#
+# RUN THIS PLAYBOOK:
+#   ansible-playbook educational/05_service_control.yml --check
+#   ansible-playbook educational/05_service_control.yml
+# =============================================================================
+
+- name: Service Control Fundamentals
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    # We'll use cron as an example - it's safe and exists on most systems
+    example_service: cron
+
+  tasks:
+
+    # =========================================================================
+    # UNDERSTANDING SERVICES
+    # =========================================================================
+    # Services (daemons) are background processes that run continuously
+    # Examples: web servers (nginx, apache), databases, cron
+    #
+    # Common service operations:
+    #   start    - launch the service
+    #   stop     - shut down the service
+    #   restart  - stop then start (brief downtime)
+    #   reload   - re-read config without stopping (no downtime)
+    #   enable   - start automatically on boot
+    #   disable  - don't start on boot
+
+    # =========================================================================
+    # TASK 1: Check service status first
+    # =========================================================================
+    - name: Check if cron service exists and get status
+      ansible.builtin.service_facts:
+      # This populates ansible_facts.services with all service info
+
+    - name: Display cron service status
+      ansible.builtin.debug:
+        msg: |
+          Service: {{ example_service }}
+          Status: {{ ansible_facts.services[example_service ~ '.service'].state | default('unknown') }}
+          Enabled: {{ ansible_facts.services[example_service ~ '.service'].status | default('unknown') }}
+      when: (example_service ~ '.service') in ansible_facts.services
+
+    # =========================================================================
+    # TASK 2: Ensure a service is started
+    # =========================================================================
+    - name: Ensure cron service is running
+      ansible.builtin.service:
+        # 'name' - the service name
+        name: "{{ example_service }}"
+        # 'state' options:
+        #   started  - start if not running
+        #   stopped  - stop if running
+        #   restarted - stop and start
+        #   reloaded  - reload configuration
+        state: started
+      # RESULT: Cron is running (or was already running - idempotent!)
+
+    # =========================================================================
+    # TASK 3: Enable a service to start on boot
+    # =========================================================================
+    - name: Ensure cron starts on boot
+      ansible.builtin.service:
+        name: "{{ example_service }}"
+        # 'enabled: true' - start automatically when system boots
+        enabled: true
+        # You can combine state and enabled in one task
+        state: started
+      # RESULT: Cron will start automatically after reboot
+
+    # =========================================================================
+    # TASK 4: The 'systemd' module for advanced control
+    # =========================================================================
+    # The 'systemd' module offers more features specific to systemd
+    - name: Reload systemd daemon (after unit file changes)
+      ansible.builtin.systemd:
+        # 'daemon_reload: true' - like 'systemctl daemon-reload'
+        # Required after adding/modifying service files
+        daemon_reload: true
+      # USE WHEN: You've created or modified a .service file
+
+    # =========================================================================
+    # TASK 5: Restart with systemd module
+    # =========================================================================
+    - name: Restart cron using systemd module
+      ansible.builtin.systemd:
+        name: "{{ example_service }}"
+        state: restarted
+        # 'enabled: true' can be set here too
+        enabled: true
+      # DIFFERENCE: systemd module has daemon_reload, service doesn't
+
+    # =========================================================================
+    # TASK 6: Example - Apache web server management
+    # =========================================================================
+    # This is similar to your apache.yml playbook!
+    - name: Manage Apache (example - not executed)
+      ansible.builtin.service:
+        # On Ubuntu: apache2, on RHEL: httpd
+        name: apache2
+        state: started
+        enabled: true
+      when: false  # Disabled - just an example
+      # YOUR apache.yml does exactly this with httpd!
+
+    # =========================================================================
+    # TASK 7: Reload vs Restart explanation
+    # =========================================================================
+    - name: Demonstrate reload (config change without stopping)
+      ansible.builtin.debug:
+        msg: |
+          RELOAD vs RESTART:
+
+          RELOAD (state: reloaded)
+          - Service reads new configuration
+          - No service interruption
+          - Existing connections stay open
+          - Use after: config file changes
+
+          RESTART (state: restarted)
+          - Service stops completely, then starts
+          - Brief service interruption
+          - All connections are dropped
+          - Use after: software updates, major changes
+
+          EXAMPLE with nginx:
+          - Changed nginx.conf? Use reload
+          - Upgraded nginx binary? Use restart
+
+    # =========================================================================
+    # TASK 8: Conditional service management
+    # =========================================================================
+    - name: Only restart if config file changed
+      ansible.builtin.debug:
+        msg: |
+          In real playbooks, you'd use this pattern:
+
+          - name: Copy Apache config
+            ansible.builtin.copy:
+              src: httpd.conf
+              dest: /etc/httpd/conf/httpd.conf
+            notify: Restart Apache    # <-- triggers handler
+
+          handlers:
+            - name: Restart Apache
+              ansible.builtin.service:
+                name: httpd
+                state: restarted
+
+          This way Apache only restarts when config actually changes!
+          We'll cover handlers in depth in lesson 09.
+
+    # =========================================================================
+    # TASK 9: Stop a service
+    # =========================================================================
+    - name: Stop cron temporarily (demonstration)
+      ansible.builtin.service:
+        name: "{{ example_service }}"
+        state: stopped
+      register: stop_result
+      # WARNING: In production, be careful stopping services!
+
+    - name: Show what happened
+      ansible.builtin.debug:
+        msg: "Service {{ example_service }} stopped: {{ stop_result.changed }}"
+
+    # =========================================================================
+    # TASK 10: Start it back up
+    # =========================================================================
+    - name: Start cron back up
+      ansible.builtin.service:
+        name: "{{ example_service }}"
+        state: started
+
+    # =========================================================================
+    # TASK 11: Working with multiple services
+    # =========================================================================
+    - name: Ensure multiple services are running
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: started
+        enabled: true
+      loop:
+        - cron
+        - rsyslog
+      # RESULT: Both services are running and enabled
+
+    # =========================================================================
+    # TASK 12: Check all running services
+    # =========================================================================
+    - name: Re-gather service facts after our changes
+      ansible.builtin.service_facts:
+
+    - name: Show all running services (just first 10)
+      ansible.builtin.debug:
+        msg: |
+          Running services:
+          {% for svc, data in ansible_facts.services.items() %}
+          {% if data.state == 'running' %}
+          - {{ svc }}
+          {% endif %}
+          {% endfor %}
+      # NOTE: In real use, you might filter this more
+
+    # =========================================================================
+    # SUMMARY
+    # =========================================================================
+    - name: Lesson Summary
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  SERVICE CONTROL COMPLETE"
+          - "============================================"
+          - ""
+          - "KEY CONCEPTS LEARNED:"
+          - "  - service module: start, stop, restart, reload"
+          - "  - systemd module: daemon_reload feature"
+          - "  - enabled: start on boot"
+          - "  - service_facts: gather service information"
+          - "  - reload vs restart: when to use each"
+          - ""
+          - "YOUR PROJECT CONNECTION:"
+          - "  This is like your apache.yml with httpd!"
+          - "  Now you understand all service operations."
+          - ""
+          - "NEXT: Try 06_template_basics.yml"

@@ -1,0 +1,389 @@
+---
+# =============================================================================
+# PLAYBOOK 12: Cron Jobs - Scheduling Automated Tasks
+# =============================================================================
+# WHAT YOU'LL LEARN:
+#   - Creating scheduled tasks with the 'cron' module
+#   - Cron time expressions (minute, hour, day, month, weekday)
+#   - Special time shortcuts (@daily, @hourly, @reboot)
+#   - Managing cron environment variables
+#   - Using cron.d for system-level cron jobs
+#
+# REAL-WORLD USE: Automated backups, cleanup, health checks!
+#
+# RUN THIS PLAYBOOK:
+#   ansible-playbook educational/12_cron_jobs.yml
+# =============================================================================
+
+- name: Cron Jobs - Task Scheduling
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    # Demo directories
+    cron_demo_dir: "/tmp/ansible-cron-demo"
+
+    # Backup settings
+    backup_dir: "/tmp/backups"
+    log_dir: "/tmp/logs"
+
+    # App to monitor (like garden-agent)
+    app_name: "garden-agent"
+    app_url: "http://localhost:8080/health"
+
+  tasks:
+
+    # =========================================================================
+    # SETUP
+    # =========================================================================
+    - name: Create demo directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - "{{ cron_demo_dir }}"
+        - "{{ backup_dir }}"
+        - "{{ log_dir }}"
+
+    # =========================================================================
+    # UNDERSTANDING CRON
+    # =========================================================================
+    - name: Explain cron time format
+      ansible.builtin.debug:
+        msg: |
+          CRON TIME FORMAT:
+          =================
+
+          ┌───────────── minute (0 - 59)
+          │ ┌───────────── hour (0 - 23)
+          │ │ ┌───────────── day of month (1 - 31)
+          │ │ │ ┌───────────── month (1 - 12)
+          │ │ │ │ ┌───────────── day of week (0 - 6, Sunday=0)
+          │ │ │ │ │
+          * * * * * command to execute
+
+          EXAMPLES:
+          0 * * * *     Every hour (at minute 0)
+          */15 * * * *  Every 15 minutes
+          0 2 * * *     Daily at 2:00 AM
+          0 3 * * 0     Weekly on Sunday at 3:00 AM
+          0 4 1 * *     Monthly on 1st at 4:00 AM
+
+          SPECIAL SHORTCUTS:
+          @reboot       Run once at startup
+          @hourly       Same as: 0 * * * *
+          @daily        Same as: 0 0 * * *
+          @weekly       Same as: 0 0 * * 0
+          @monthly      Same as: 0 0 1 * *
+          @annually     Same as: 0 0 1 1 *
+
+    # =========================================================================
+    # BASIC CRON JOBS
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 1: Create a simple cron job
+    # -------------------------------------------------------------------------
+    - name: Create a cron job that runs every minute (demo)
+      ansible.builtin.cron:
+        # 'name' is the comment/identifier - REQUIRED for idempotency
+        name: "Demo: Write timestamp every minute"
+        # Time specification (defaults to * if not specified)
+        minute: "*"
+        hour: "*"
+        day: "*"
+        month: "*"
+        weekday: "*"
+        # The command to run
+        job: "echo $(date) >> {{ cron_demo_dir }}/every_minute.log"
+        # 'state: present' ensures job exists (default)
+        state: present
+      # RESULT: Adds entry to current user's crontab
+
+    # -------------------------------------------------------------------------
+    # TASK 2: Hourly cron job
+    # -------------------------------------------------------------------------
+    - name: Create hourly cleanup job
+      ansible.builtin.cron:
+        name: "Cleanup old temp files"
+        # Run at minute 0 of every hour
+        minute: "0"
+        job: "find /tmp -type f -mtime +7 -delete 2>/dev/null"
+        state: present
+      # RESULT: Cleans files older than 7 days, every hour
+
+    # -------------------------------------------------------------------------
+    # TASK 3: Daily cron job
+    # -------------------------------------------------------------------------
+    - name: Create daily backup job
+      ansible.builtin.cron:
+        name: "Daily database backup"
+        # Run at 2:30 AM daily
+        minute: "30"
+        hour: "2"
+        job: "{{ cron_demo_dir }}/backup.sh >> {{ log_dir }}/backup.log 2>&1"
+        state: present
+
+    # Create the backup script
+    - name: Create backup script
+      ansible.builtin.copy:
+        content: |
+          #!/bin/bash
+          # Daily backup script - created by Ansible
+          DATE=$(date +%Y%m%d)
+          echo "Starting backup at $(date)"
+          # In real use: pg_dump, tar, rsync, etc.
+          tar -czf {{ backup_dir }}/backup_$DATE.tar.gz /etc/hosts
+          echo "Backup completed at $(date)"
+        dest: "{{ cron_demo_dir }}/backup.sh"
+        mode: '0755'
+
+    # =========================================================================
+    # SPECIAL TIME SHORTCUTS
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 4: Using special_time parameter
+    # -------------------------------------------------------------------------
+    - name: Run script on system reboot
+      ansible.builtin.cron:
+        name: "Start application on boot"
+        # 'special_time' replaces minute/hour/day/month/weekday
+        special_time: reboot
+        job: "{{ cron_demo_dir }}/startup.sh"
+        state: present
+
+    - name: Create startup script
+      ansible.builtin.copy:
+        content: |
+          #!/bin/bash
+          # Startup script - runs on system boot
+          echo "System booted at $(date)" >> {{ log_dir }}/startup.log
+          # In real use: start your application
+          # cd /opt/garden-agent && docker-compose up -d
+        dest: "{{ cron_demo_dir }}/startup.sh"
+        mode: '0755'
+
+    - name: Daily maintenance (using special_time)
+      ansible.builtin.cron:
+        name: "Daily system maintenance"
+        special_time: daily
+        job: "{{ cron_demo_dir }}/maintenance.sh >> {{ log_dir }}/maintenance.log 2>&1"
+        state: present
+
+    # =========================================================================
+    # CRON FOR SPECIFIC USER
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 5: Managing another user's crontab
+    # -------------------------------------------------------------------------
+    - name: Show user-specific cron
+      ansible.builtin.debug:
+        msg: |
+          MANAGING OTHER USER'S CRONTAB:
+          ==============================
+
+          - name: Create cron for www-data user
+            ansible.builtin.cron:
+              name: "Web cleanup"
+              minute: "0"
+              hour: "3"
+              job: "/usr/local/bin/web-cleanup.sh"
+              user: www-data    # Run as this user
+            become: true        # Need root to edit other user's crontab
+
+    # =========================================================================
+    # CRON ENVIRONMENT VARIABLES
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 6: Setting cron environment variables
+    # -------------------------------------------------------------------------
+    - name: Set PATH for cron jobs
+      ansible.builtin.cron:
+        name: PATH
+        # 'env: true' indicates this is an environment variable
+        env: true
+        job: "/usr/local/bin:/usr/bin:/bin"
+        state: present
+
+    - name: Set MAILTO for cron notifications
+      ansible.builtin.cron:
+        name: MAILTO
+        env: true
+        job: "admin@example.com"
+        state: present
+      # RESULT: Cron output emails go to this address
+
+    - name: Disable cron email (send to /dev/null)
+      ansible.builtin.cron:
+        name: MAILTO
+        env: true
+        job: ""
+        state: present
+      # Empty MAILTO = no emails sent
+
+    # =========================================================================
+    # PRACTICAL EXAMPLES
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 7: Health check for garden-agent
+    # -------------------------------------------------------------------------
+    - name: Create health check cron (every 5 minutes)
+      ansible.builtin.cron:
+        name: "Health check garden-agent"
+        minute: "*/5"
+        job: 'curl -sf {{ app_url }} >/dev/null || echo "ALERT: {{ app_name }} is down!" >> {{ log_dir }}/health.log'
+        state: present
+      # RESULT: Checks app health every 5 minutes, logs failures
+
+    - name: Create health check script (more sophisticated)
+      ansible.builtin.copy:
+        content: |
+          #!/bin/bash
+          # Health check script for {{ app_name }}
+          APP_URL="{{ app_url }}"
+          LOG_FILE="{{ log_dir }}/health.log"
+
+          # Check if app responds
+          if curl -sf "$APP_URL" >/dev/null 2>&1; then
+              echo "$(date): {{ app_name }} is healthy"
+          else
+              echo "$(date): {{ app_name }} is DOWN - attempting restart" >> $LOG_FILE
+              # Restart the application
+              cd /opt/garden-agent && docker-compose restart
+          fi
+        dest: "{{ cron_demo_dir }}/health_check.sh"
+        mode: '0755'
+
+    # -------------------------------------------------------------------------
+    # TASK 8: Log rotation cron
+    # -------------------------------------------------------------------------
+    - name: Weekly log rotation
+      ansible.builtin.cron:
+        name: "Rotate application logs"
+        minute: "0"
+        hour: "0"
+        weekday: "0"
+        job: "find {{ log_dir }} -name '*.log' -size +10M -exec gzip {} \\;"
+        state: present
+      # RESULT: Compress logs over 10MB every Sunday at midnight
+
+    # -------------------------------------------------------------------------
+    # TASK 9: Monthly cleanup
+    # -------------------------------------------------------------------------
+    - name: Monthly old backup cleanup
+      ansible.builtin.cron:
+        name: "Remove old backups"
+        minute: "0"
+        hour: "4"
+        day: "1"
+        job: "find {{ backup_dir }} -name '*.tar.gz' -mtime +30 -delete"
+        state: present
+      # RESULT: Delete backups older than 30 days on the 1st of each month
+
+    # =========================================================================
+    # MANAGING CRON JOBS
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 10: Remove a cron job
+    # -------------------------------------------------------------------------
+    - name: Remove the every-minute demo cron
+      ansible.builtin.cron:
+        name: "Demo: Write timestamp every minute"
+        # 'state: absent' removes the job
+        state: absent
+      # The 'name' must match exactly to remove the correct job
+
+    # -------------------------------------------------------------------------
+    # TASK 11: Disable a cron job (comment it out)
+    # -------------------------------------------------------------------------
+    - name: Disable maintenance cron (keep but don't run)
+      ansible.builtin.cron:
+        name: "Daily system maintenance"
+        special_time: daily
+        job: "{{ cron_demo_dir }}/maintenance.sh >> {{ log_dir }}/maintenance.log 2>&1"
+        # 'disabled: true' comments out the job
+        disabled: true
+        state: present
+      # RESULT: Job stays in crontab but is commented out
+
+    # =========================================================================
+    # USING CRON.D (SYSTEM-WIDE CRON)
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 12: System-wide cron with cron.d
+    # -------------------------------------------------------------------------
+    - name: Show cron.d approach
+      ansible.builtin.debug:
+        msg: |
+          SYSTEM-WIDE CRON (/etc/cron.d):
+          ================================
+
+          Instead of editing user crontabs, create files in /etc/cron.d
+
+          - name: Create system cron job
+            ansible.builtin.cron:
+              name: "system-backup"
+              minute: "0"
+              hour: "3"
+              job: "/opt/scripts/backup.sh"
+              user: root
+              cron_file: system-backup    # Creates /etc/cron.d/system-backup
+
+          Benefits:
+          - Easier to manage with Ansible
+          - Can specify user per-job
+          - Visible in /etc/cron.d directory
+          - Part of system config (not user config)
+
+    # =========================================================================
+    # VERIFICATION
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 13: Show current crontab
+    # -------------------------------------------------------------------------
+    - name: Display current crontab
+      ansible.builtin.command: crontab -l
+      register: crontab_list
+      changed_when: false
+      ignore_errors: true
+
+    - name: Show crontab contents
+      ansible.builtin.debug:
+        msg: "{{ crontab_list.stdout_lines }}"
+      when: crontab_list.rc == 0
+
+    # =========================================================================
+    # SUMMARY
+    # =========================================================================
+    - name: Lesson Summary
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  CRON JOBS COMPLETE"
+          - "============================================"
+          - ""
+          - "KEY CONCEPTS LEARNED:"
+          - "  - cron module: name, minute, hour, day, month, weekday"
+          - "  - special_time: reboot, daily, hourly, weekly, monthly"
+          - "  - env: true - set cron environment variables"
+          - "  - disabled: true - comment out without removing"
+          - "  - state: absent - remove cron job"
+          - "  - cron_file: system-wide /etc/cron.d jobs"
+          - ""
+          - "COMMON PATTERNS:"
+          - "  */15 * * * *  - Every 15 minutes"
+          - "  0 * * * *     - Every hour"
+          - "  0 2 * * *     - Daily at 2 AM"
+          - "  0 3 * * 0     - Weekly Sunday 3 AM"
+          - "  0 4 1 * *     - Monthly 1st at 4 AM"
+          - ""
+          - "NEXT: Try 13_error_handling.yml"
