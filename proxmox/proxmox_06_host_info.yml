@@ -1,0 +1,488 @@
+---
+# =============================================================================
+# PROXMOX PLAYBOOK 06: Get Configuration Info on All Hosts
+# =============================================================================
+# IMPORTANT: This playbook runs ONLY on the Proxmox server itself!
+#            Do NOT run this from a remote Ansible control node.
+#            Install Ansible directly on your Proxmox host.
+#
+# WHAT YOU'LL LEARN:
+#   - Using Proxmox CLI tools (pvesh, pct, qm) for system information
+#   - Querying the Proxmox API from the command line
+#   - Gathering comprehensive host information
+#   - Formatting and displaying system data
+#   - Creating inventory reports
+#
+# PROXMOX CLI TOOLS:
+#   - pvesh: Access Proxmox API from command line (most powerful)
+#   - pct: Container management (list, config, status)
+#   - qm: VM management (list, config, status)
+#   - pvecm: Cluster management
+#   - pvesm: Storage management
+#
+# PREREQUISITES:
+#   - Ansible installed on the Proxmox server (see README_PROXMOX.md)
+#   - Root access to Proxmox
+#
+# RUN THIS PLAYBOOK:
+#   ansible-playbook proxmox/proxmox_06_host_info.yml
+#
+# SAVE OUTPUT TO FILE:
+#   ansible-playbook proxmox/proxmox_06_host_info.yml -e "save_report=true"
+# =============================================================================
+
+- name: Proxmox - Get Configuration Info on All Hosts
+  # ---------------------------------------------------------------------------
+  # HOST CONFIGURATION
+  # ---------------------------------------------------------------------------
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  become: true
+
+  # ---------------------------------------------------------------------------
+  # VARIABLES
+  # ---------------------------------------------------------------------------
+  vars:
+    # save_report: Whether to save the report to a file
+    save_report: false
+
+    # report_path: Where to save the report
+    report_path: "/root/proxmox_host_report_{{ ansible_date_time.date }}.txt"
+
+    # include_detailed_config: Get detailed configuration for each guest
+    include_detailed_config: true
+
+    # include_resource_usage: Include CPU/memory usage statistics
+    include_resource_usage: true
+
+  # ---------------------------------------------------------------------------
+  # TASKS
+  # ---------------------------------------------------------------------------
+  tasks:
+
+    # =========================================================================
+    # TASK 1: Gather Proxmox Node Information
+    # =========================================================================
+    - name: Display playbook introduction
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  Proxmox Host Information Report"
+          - "============================================"
+          - "  Gathering comprehensive system information..."
+          - "============================================"
+
+    # Get node (Proxmox host) information
+    - name: Get Proxmox node status
+      ansible.builtin.shell:
+        # pvesh get /nodes/<node>/status returns node details
+        # We use 'hostname -s' to get the short hostname (node name)
+        cmd: "pvesh get /nodes/$(hostname -s)/status --output-format json"
+      register: node_status
+      changed_when: false
+
+    - name: Parse node status
+      ansible.builtin.set_fact:
+        node_info: "{{ node_status.stdout | from_json }}"
+
+    - name: Display Proxmox node information
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  PROXMOX NODE INFORMATION"
+          - "============================================"
+          - "  Hostname:    {{ ansible_hostname }}"
+          - "  Proxmox VE:  {{ node_info.pveversion | default('Unknown') }}"
+          - "  Kernel:      {{ node_info.kversion | default(ansible_kernel) }}"
+          - "  Uptime:      {{ (node_info.uptime | default(0) / 86400) | round(1) }} days"
+          - ""
+          - "  CPU:"
+          - "    Model:     {{ node_info.cpuinfo.model | default('Unknown') }}"
+          - "    Cores:     {{ node_info.cpuinfo.cpus | default('Unknown') }}"
+          - "    Sockets:   {{ node_info.cpuinfo.sockets | default('Unknown') }}"
+          - "    Usage:     {{ (node_info.cpu | default(0) * 100) | round(1) }}%"
+          - ""
+          - "  Memory:"
+          - "    Total:     {{ ((node_info.memory.total | default(0)) / 1073741824) | round(2) }} GB"
+          - "    Used:      {{ ((node_info.memory.used | default(0)) / 1073741824) | round(2) }} GB"
+          - "    Free:      {{ ((node_info.memory.free | default(0)) / 1073741824) | round(2) }} GB"
+          - "    Usage:     {{ (((node_info.memory.used | default(0)) / (node_info.memory.total | default(1))) * 100) | round(1) }}%"
+          - ""
+          - "  Swap:"
+          - "    Total:     {{ ((node_info.swap.total | default(0)) / 1073741824) | round(2) }} GB"
+          - "    Used:      {{ ((node_info.swap.used | default(0)) / 1073741824) | round(2) }} GB"
+          - "============================================"
+
+    # =========================================================================
+    # TASK 2: Get Storage Information
+    # =========================================================================
+    - name: Get storage status
+      ansible.builtin.shell:
+        # pvesm status shows all configured storage
+        cmd: "pvesm status --output-format json"
+      register: storage_status
+      changed_when: false
+
+    - name: Parse storage status
+      ansible.builtin.set_fact:
+        storage_info: "{{ storage_status.stdout | from_json }}"
+
+    - name: Display storage information
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  STORAGE OVERVIEW"
+          - "============================================"
+          - "{% for storage in storage_info %}"
+          - "  {{ storage.storage }}:"
+          - "    Type:      {{ storage.type }}"
+          - "    Status:    {{ storage.active | ternary('Active', 'Inactive') }}"
+          - "    Total:     {{ ((storage.total | default(0)) / 1073741824) | round(2) }} GB"
+          - "    Used:      {{ ((storage.used | default(0)) / 1073741824) | round(2) }} GB"
+          - "    Available: {{ ((storage.avail | default(0)) / 1073741824) | round(2) }} GB"
+          - "    Usage:     {{ (((storage.used | default(0)) / (storage.total | default(1))) * 100) | round(1) }}%"
+          - ""
+          - "{% endfor %}"
+          - "============================================"
+
+    # =========================================================================
+    # TASK 3: Get All Containers
+    # =========================================================================
+    - name: Get list of all containers
+      ansible.builtin.shell:
+        # pct list shows all containers
+        cmd: "pct list --output-format json 2>/dev/null || echo '[]'"
+      register: container_list
+      changed_when: false
+
+    - name: Parse container list
+      ansible.builtin.set_fact:
+        containers: "{{ container_list.stdout | from_json }}"
+
+    - name: Display container summary
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  LXC CONTAINERS"
+          - "============================================"
+          - "  Total containers: {{ containers | length }}"
+          - "  Running: {{ containers | selectattr('status', 'equalto', 'running') | list | length }}"
+          - "  Stopped: {{ containers | selectattr('status', 'equalto', 'stopped') | list | length }}"
+          - "============================================"
+          - ""
+          - "{% for ct in containers | sort(attribute='vmid') %}"
+          - "  CT {{ ct.vmid }} - {{ ct.name | default('unnamed') }}"
+          - "    Status:  {{ ct.status }}"
+          - "{% endfor %}"
+
+    # =========================================================================
+    # TASK 4: Get Detailed Container Info
+    # =========================================================================
+    - name: Get detailed container configuration
+      when: include_detailed_config and containers | length > 0
+      block:
+        - name: Get container configs
+          ansible.builtin.shell:
+            cmd: "pct config {{ item.vmid }} --output-format json"
+          register: container_configs
+          changed_when: false
+          loop: "{{ containers }}"
+          loop_control:
+            label: "CT {{ item.vmid }}"
+
+        # Get resource usage for running containers
+        - name: Get container resource usage
+          ansible.builtin.shell:
+            cmd: "pct status {{ item.vmid }} --verbose --output-format json 2>/dev/null || echo '{}'"
+          register: container_resources
+          changed_when: false
+          loop: "{{ containers | selectattr('status', 'equalto', 'running') | list }}"
+          loop_control:
+            label: "CT {{ item.vmid }}"
+          when: include_resource_usage
+
+        - name: Display detailed container information
+          ansible.builtin.debug:
+            msg:
+              - "  ----------------------------------------"
+              - "  CT {{ item.item.vmid }} - {{ item.item.name | default('unnamed') }}"
+              - "  ----------------------------------------"
+              - "{% set config = item.stdout | from_json %}"
+              - "    Hostname:    {{ config.hostname | default('N/A') }}"
+              - "    Memory:      {{ config.memory | default('N/A') }} MB"
+              - "    Swap:        {{ config.swap | default('N/A') }} MB"
+              - "    Cores:       {{ config.cores | default('N/A') }}"
+              - "    Disk:        {{ config.rootfs | default('N/A') }}"
+              - "    Network:     {{ config.net0 | default('N/A') }}"
+              - "    Onboot:      {{ config.onboot | default(0) | bool }}"
+              - "    Unprivileged: {{ config.unprivileged | default(0) | bool }}"
+          loop: "{{ container_configs.results }}"
+          loop_control:
+            label: "CT {{ item.item.vmid }}"
+
+    # =========================================================================
+    # TASK 5: Get All Virtual Machines
+    # =========================================================================
+    - name: Get list of all VMs
+      ansible.builtin.shell:
+        # qm list shows all VMs
+        cmd: "qm list --output-format json 2>/dev/null || echo '[]'"
+      register: vm_list
+      changed_when: false
+
+    - name: Parse VM list
+      ansible.builtin.set_fact:
+        vms: "{{ vm_list.stdout | from_json }}"
+
+    - name: Display VM summary
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  VIRTUAL MACHINES (QEMU/KVM)"
+          - "============================================"
+          - "  Total VMs: {{ vms | length }}"
+          - "  Running: {{ vms | selectattr('status', 'equalto', 'running') | list | length }}"
+          - "  Stopped: {{ vms | selectattr('status', 'equalto', 'stopped') | list | length }}"
+          - "============================================"
+          - ""
+          - "{% for vm in vms | sort(attribute='vmid') %}"
+          - "  VM {{ vm.vmid }} - {{ vm.name | default('unnamed') }}"
+          - "    Status:  {{ vm.status }}"
+          - "    Memory:  {{ vm.maxmem | default(0) | int // 1048576 }} MB"
+          - "    CPUs:    {{ vm.cpus | default('N/A') }}"
+          - "{% endfor %}"
+
+    # =========================================================================
+    # TASK 6: Get Detailed VM Information
+    # =========================================================================
+    - name: Get detailed VM configuration
+      when: include_detailed_config and vms | length > 0
+      block:
+        - name: Get VM configs
+          ansible.builtin.shell:
+            cmd: "qm config {{ item.vmid }} --output-format json 2>/dev/null || echo '{}'"
+          register: vm_configs
+          changed_when: false
+          loop: "{{ vms }}"
+          loop_control:
+            label: "VM {{ item.vmid }}"
+
+        - name: Display detailed VM information
+          ansible.builtin.debug:
+            msg:
+              - "  ----------------------------------------"
+              - "  VM {{ item.item.vmid }} - {{ item.item.name | default('unnamed') }}"
+              - "  ----------------------------------------"
+              - "{% set config = item.stdout | from_json %}"
+              - "    Name:        {{ config.name | default('N/A') }}"
+              - "    Memory:      {{ config.memory | default('N/A') }} MB"
+              - "    Balloon:     {{ config.balloon | default('N/A') }} MB"
+              - "    Cores:       {{ config.cores | default('N/A') }}"
+              - "    Sockets:     {{ config.sockets | default('N/A') }}"
+              - "    OS Type:     {{ config.ostype | default('N/A') }}"
+              - "    SCSI HW:     {{ config.scsihw | default('N/A') }}"
+              - "    Boot:        {{ config.boot | default('N/A') }}"
+              - "    Agent:       {{ config.agent | default('N/A') }}"
+              - "    Onboot:      {{ config.onboot | default(0) | bool }}"
+          loop: "{{ vm_configs.results }}"
+          loop_control:
+            label: "VM {{ item.item.vmid }}"
+
+    # =========================================================================
+    # TASK 7: Get Network Information
+    # =========================================================================
+    - name: Get network bridges
+      ansible.builtin.shell:
+        cmd: "cat /etc/network/interfaces | grep -E '^(auto|iface)' || echo 'Unable to read network config'"
+      register: network_info
+      changed_when: false
+
+    - name: Get active bridges
+      ansible.builtin.shell:
+        cmd: "brctl show 2>/dev/null || ip link show type bridge"
+      register: bridge_info
+      changed_when: false
+
+    - name: Display network information
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  NETWORK CONFIGURATION"
+          - "============================================"
+          - "  Active Bridges:"
+          - "{{ bridge_info.stdout }}"
+          - "============================================"
+
+    # =========================================================================
+    # TASK 8: Get Cluster Information (if applicable)
+    # =========================================================================
+    - name: Check if node is part of a cluster
+      ansible.builtin.command:
+        cmd: "pvecm status"
+      register: cluster_status
+      failed_when: false
+      changed_when: false
+
+    - name: Display cluster information
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  CLUSTER STATUS"
+          - "============================================"
+          - "{% if cluster_status.rc == 0 %}"
+          - "{{ cluster_status.stdout }}"
+          - "{% else %}"
+          - "  This node is not part of a cluster"
+          - "  (or clustering is not configured)"
+          - "{% endif %}"
+          - "============================================"
+
+    # =========================================================================
+    # TASK 9: Get Guest IP Addresses
+    # =========================================================================
+    - name: Collect IP addresses from running containers
+      ansible.builtin.shell:
+        cmd: "pct exec {{ item.vmid }} -- hostname -I 2>/dev/null | awk '{print $1}'"
+      register: ct_ips
+      loop: "{{ containers | selectattr('status', 'equalto', 'running') | list }}"
+      loop_control:
+        label: "CT {{ item.vmid }}"
+      changed_when: false
+      failed_when: false
+
+    - name: Collect IP addresses from running VMs (via guest agent)
+      ansible.builtin.shell:
+        cmd: |
+          qm guest cmd {{ item.vmid }} network-get-interfaces 2>/dev/null | \
+          jq -r '.[] | select(.name != "lo") | .["ip-addresses"][]? | select(.["ip-address-type"] == "ipv4") | .["ip-address"]' | \
+          head -1
+      register: vm_ips
+      loop: "{{ vms | selectattr('status', 'equalto', 'running') | list }}"
+      loop_control:
+        label: "VM {{ item.vmid }}"
+      changed_when: false
+      failed_when: false
+
+    - name: Display guest IP addresses
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  GUEST IP ADDRESSES"
+          - "============================================"
+          - "  Containers:"
+          - "{% for result in ct_ips.results | default([]) %}"
+          - "    CT {{ result.item.vmid }} ({{ result.item.name | default('unnamed') }}): {{ result.stdout | default('N/A') }}"
+          - "{% endfor %}"
+          - ""
+          - "  Virtual Machines:"
+          - "{% for result in vm_ips.results | default([]) %}"
+          - "    VM {{ result.item.vmid }} ({{ result.item.name | default('unnamed') }}): {{ result.stdout | default('N/A (no agent?)') }}"
+          - "{% endfor %}"
+          - "============================================"
+
+    # =========================================================================
+    # TASK 10: Generate Summary Report
+    # =========================================================================
+    - name: Compile full report
+      ansible.builtin.set_fact:
+        full_report: |
+          ================================================================================
+          PROXMOX HOST CONFIGURATION REPORT
+          Generated: {{ ansible_date_time.iso8601 }}
+          Host: {{ ansible_hostname }}
+          ================================================================================
+
+          NODE INFORMATION
+          ================================================================================
+          Proxmox VE:     {{ node_info.pveversion | default('Unknown') }}
+          Kernel:         {{ node_info.kversion | default(ansible_kernel) }}
+          Uptime:         {{ (node_info.uptime | default(0) / 86400) | round(1) }} days
+
+          CPU:
+            Model:        {{ node_info.cpuinfo.model | default('Unknown') }}
+            Cores:        {{ node_info.cpuinfo.cpus | default('Unknown') }}
+            Usage:        {{ (node_info.cpu | default(0) * 100) | round(1) }}%
+
+          Memory:
+            Total:        {{ ((node_info.memory.total | default(0)) / 1073741824) | round(2) }} GB
+            Used:         {{ ((node_info.memory.used | default(0)) / 1073741824) | round(2) }} GB
+            Usage:        {{ (((node_info.memory.used | default(0)) / (node_info.memory.total | default(1))) * 100) | round(1) }}%
+
+          STORAGE
+          ================================================================================
+          {% for storage in storage_info %}
+          {{ storage.storage }}:
+            Type:         {{ storage.type }}
+            Total:        {{ ((storage.total | default(0)) / 1073741824) | round(2) }} GB
+            Used:         {{ ((storage.used | default(0)) / 1073741824) | round(2) }} GB
+            Available:    {{ ((storage.avail | default(0)) / 1073741824) | round(2) }} GB
+          {% endfor %}
+
+          LXC CONTAINERS ({{ containers | length }} total)
+          ================================================================================
+          {% for ct in containers | sort(attribute='vmid') %}
+          CT {{ ct.vmid }} - {{ ct.name | default('unnamed') }}
+            Status:       {{ ct.status }}
+          {% endfor %}
+
+          VIRTUAL MACHINES ({{ vms | length }} total)
+          ================================================================================
+          {% for vm in vms | sort(attribute='vmid') %}
+          VM {{ vm.vmid }} - {{ vm.name | default('unnamed') }}
+            Status:       {{ vm.status }}
+            Memory:       {{ vm.maxmem | default(0) | int // 1048576 }} MB
+          {% endfor %}
+
+          IP ADDRESSES
+          ================================================================================
+          {% for result in ct_ips.results | default([]) %}
+          CT {{ result.item.vmid }}: {{ result.stdout | default('N/A') }}
+          {% endfor %}
+          {% for result in vm_ips.results | default([]) %}
+          VM {{ result.item.vmid }}: {{ result.stdout | default('N/A') }}
+          {% endfor %}
+
+          ================================================================================
+          END OF REPORT
+          ================================================================================
+
+    - name: Save report to file
+      when: save_report
+      ansible.builtin.copy:
+        content: "{{ full_report }}"
+        dest: "{{ report_path }}"
+        mode: '0600'
+
+    - name: Display report save location
+      when: save_report
+      ansible.builtin.debug:
+        msg: "Report saved to: {{ report_path }}"
+
+    # =========================================================================
+    # TASK 11: Final Summary
+    # =========================================================================
+    - name: Display completion summary
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  Host Information Report Complete"
+          - "============================================"
+          - ""
+          - "SUMMARY:"
+          - "  Containers: {{ containers | length }} ({{ containers | selectattr('status', 'equalto', 'running') | list | length }} running)"
+          - "  VMs:        {{ vms | length }} ({{ vms | selectattr('status', 'equalto', 'running') | list | length }} running)"
+          - "  Storage:    {{ storage_info | length }} pools"
+          - ""
+          - "QUICK COMMANDS:"
+          - "  View containers:  pct list"
+          - "  View VMs:         qm list"
+          - "  View storage:     pvesm status"
+          - "  Node status:      pvesh get /nodes/$(hostname -s)/status"
+          - ""
+          - "{% if save_report %}"
+          - "REPORT SAVED TO: {{ report_path }}"
+          - "{% else %}"
+          - "TIP: Run with -e \"save_report=true\" to save report to file"
+          - "{% endif %}"
+          - "============================================"

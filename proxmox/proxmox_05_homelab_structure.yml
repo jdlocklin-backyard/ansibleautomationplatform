@@ -1,0 +1,517 @@
+---
+# =============================================================================
+# PROXMOX PLAYBOOK 05: Homelab Application Folder Structure
+# =============================================================================
+# IMPORTANT: This playbook runs ONLY on the Proxmox server itself!
+#            Do NOT run this from a remote Ansible control node.
+#            Install Ansible directly on your Proxmox host.
+#
+# WHAT YOU'LL LEARN:
+#   - Creating standardized folder structures via pct/qm exec
+#   - Setting up directories for Docker and application data
+#   - Configuring permissions for homelab applications
+#   - Best practices for organizing containerized applications
+#   - How to use loops to create multiple directories
+#
+# FOLDER STRUCTURE PHILOSOPHY:
+#   - /opt/homelab/           - Root for all homelab applications
+#   - /opt/homelab/apps/      - Individual application directories
+#   - /opt/homelab/data/      - Persistent data storage
+#   - /opt/homelab/config/    - Configuration files
+#   - /opt/homelab/backups/   - Local backups
+#   - /opt/homelab/scripts/   - Maintenance scripts
+#
+# WHY THIS STRUCTURE?
+#   - Easy to backup (single location)
+#   - Clear separation of apps, data, and configs
+#   - Works well with Docker volumes
+#   - Easy to migrate between hosts
+#
+# PREREQUISITES:
+#   - SSH access configured (run playbooks 03 and 04 first)
+#   - Containers/VMs running and accessible
+#
+# RUN THIS PLAYBOOK:
+#   ansible-playbook proxmox/proxmox_05_homelab_structure.yml
+# =============================================================================
+
+- name: Proxmox - Create Homelab Folder Structure
+  # ---------------------------------------------------------------------------
+  # HOST CONFIGURATION
+  # ---------------------------------------------------------------------------
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  become: true
+
+  # ---------------------------------------------------------------------------
+  # VARIABLES
+  # ---------------------------------------------------------------------------
+  vars:
+    # =========================================================================
+    # BASE PATHS
+    # =========================================================================
+    # homelab_root: Root directory for all homelab content
+    # Using /opt because it's for optional/add-on software
+    homelab_root: "/opt/homelab"
+
+    # =========================================================================
+    # DIRECTORY STRUCTURE
+    # =========================================================================
+    # directories: List of directories to create
+    # Each entry can have:
+    #   - path: Relative to homelab_root
+    #   - mode: Permissions (default: 0755)
+    #   - owner: Owner (default: root)
+    #   - description: What it's for (for documentation)
+    directories:
+      # ----- Top Level Directories -----
+      - path: "apps"
+        description: "Individual application directories"
+
+      - path: "data"
+        description: "Persistent data storage for applications"
+
+      - path: "config"
+        description: "Configuration files and environment variables"
+
+      - path: "backups"
+        description: "Local backup storage"
+        mode: "0750"
+
+      - path: "scripts"
+        description: "Maintenance and automation scripts"
+        mode: "0750"
+
+      - path: "logs"
+        description: "Application logs"
+
+      - path: "secrets"
+        description: "Sensitive configuration (API keys, passwords)"
+        mode: "0700"
+
+      # ----- Docker-related Directories -----
+      - path: "docker"
+        description: "Docker compose files and related configs"
+
+      - path: "docker/compose"
+        description: "Docker compose files"
+
+      - path: "docker/volumes"
+        description: "Docker named volumes mount point"
+
+      # ----- Common Application Directories -----
+      # These are templates for common homelab applications
+      - path: "apps/portainer"
+        description: "Portainer container management"
+
+      - path: "apps/nginx-proxy"
+        description: "Nginx reverse proxy"
+
+      - path: "apps/pihole"
+        description: "Pi-hole DNS ad-blocker"
+
+      - path: "apps/homeassistant"
+        description: "Home Assistant automation"
+
+      - path: "apps/nextcloud"
+        description: "Nextcloud file hosting"
+
+      - path: "apps/jellyfin"
+        description: "Jellyfin media server"
+
+      - path: "apps/grafana"
+        description: "Grafana monitoring dashboards"
+
+      - path: "apps/prometheus"
+        description: "Prometheus metrics collection"
+
+      # ----- Data Directories -----
+      - path: "data/databases"
+        description: "Database storage"
+        mode: "0700"
+
+      - path: "data/media"
+        description: "Media files (photos, videos, music)"
+
+      - path: "data/documents"
+        description: "Document storage"
+
+      - path: "data/downloads"
+        description: "Download staging area"
+
+      # ----- Config Subdirectories -----
+      - path: "config/ssl"
+        description: "SSL certificates"
+        mode: "0700"
+
+      - path: "config/env"
+        description: "Environment variable files"
+        mode: "0600"
+
+    # =========================================================================
+    # TEMPLATE FILES TO CREATE
+    # =========================================================================
+    template_files:
+      - path: "docker/compose/.env.template"
+        description: "Template environment file"
+        content: |
+          # =============================================================================
+          # Environment Variables Template
+          # =============================================================================
+          # Copy this to .env and fill in your values
+          # NEVER commit .env files to git!
+          # =============================================================================
+
+          # General Settings
+          TZ=America/New_York
+          PUID=1000
+          PGID=1000
+
+          # Domain Configuration
+          DOMAIN=example.com
+          EMAIL=admin@example.com
+
+          # Database Credentials (change these!)
+          MYSQL_ROOT_PASSWORD=changeme
+          MYSQL_DATABASE=homelab
+          MYSQL_USER=homelab
+          MYSQL_PASSWORD=changeme
+
+          # API Keys (get from respective services)
+          # OPENWEATHER_API_KEY=
+          # CLOUDFLARE_API_KEY=
+
+      - path: "scripts/backup.sh"
+        description: "Backup script template"
+        mode: "0750"
+        content: |
+          #!/bin/bash
+          # =============================================================================
+          # Homelab Backup Script
+          # =============================================================================
+          # Run this script to backup your homelab data
+          # Recommended: Set up as a cron job
+          # =============================================================================
+
+          BACKUP_DIR="{{ homelab_root }}/backups"
+          DATE=$(date +%Y%m%d_%H%M%S)
+          RETENTION_DAYS=7
+
+          echo "Starting backup at $(date)"
+
+          # Create dated backup directory
+          mkdir -p "$BACKUP_DIR/$DATE"
+
+          # Backup Docker volumes
+          echo "Backing up Docker volumes..."
+          docker volume ls -q | while read vol; do
+              docker run --rm \
+                  -v "$vol":/source:ro \
+                  -v "$BACKUP_DIR/$DATE":/backup \
+                  alpine tar czf "/backup/${vol}.tar.gz" -C /source .
+          done
+
+          # Backup configuration
+          echo "Backing up configuration..."
+          tar czf "$BACKUP_DIR/$DATE/config.tar.gz" -C "{{ homelab_root }}" config
+
+          # Backup compose files
+          echo "Backing up compose files..."
+          tar czf "$BACKUP_DIR/$DATE/compose.tar.gz" -C "{{ homelab_root }}/docker" compose
+
+          # Cleanup old backups
+          echo "Cleaning up backups older than $RETENTION_DAYS days..."
+          find "$BACKUP_DIR" -maxdepth 1 -type d -mtime +$RETENTION_DAYS -exec rm -rf {} \;
+
+          echo "Backup completed at $(date)"
+
+      - path: "scripts/update.sh"
+        description: "Update script for containers"
+        mode: "0750"
+        content: |
+          #!/bin/bash
+          # =============================================================================
+          # Homelab Update Script
+          # =============================================================================
+          # Updates all Docker containers to latest versions
+          # =============================================================================
+
+          COMPOSE_DIR="{{ homelab_root }}/docker/compose"
+
+          echo "Updating containers at $(date)"
+
+          # Pull latest images
+          echo "Pulling latest images..."
+          cd "$COMPOSE_DIR"
+          for f in *.yml *.yaml; do
+              if [ -f "$f" ]; then
+                  echo "Processing $f..."
+                  docker compose -f "$f" pull
+              fi
+          done
+
+          # Recreate containers with new images
+          echo "Recreating containers..."
+          for f in *.yml *.yaml; do
+              if [ -f "$f" ]; then
+                  docker compose -f "$f" up -d
+              fi
+          done
+
+          # Cleanup old images
+          echo "Cleaning up unused images..."
+          docker image prune -f
+
+          echo "Update completed at $(date)"
+
+      - path: "README.md"
+        description: "Documentation"
+        content: |
+          # Homelab Directory Structure
+
+          This directory contains all homelab applications and data.
+
+          ## Directory Layout
+
+          ```
+          {{ homelab_root }}/
+          ├── apps/               # Individual application directories
+          │   ├── portainer/      # Container management
+          │   ├── nginx-proxy/    # Reverse proxy
+          │   └── ...
+          ├── data/               # Persistent data storage
+          │   ├── databases/      # Database files
+          │   ├── media/          # Media files
+          │   └── documents/      # Documents
+          ├── config/             # Configuration files
+          │   ├── ssl/            # SSL certificates
+          │   └── env/            # Environment files
+          ├── docker/             # Docker-related files
+          │   ├── compose/        # Docker compose files
+          │   └── volumes/        # Named volume mounts
+          ├── backups/            # Local backups
+          ├── scripts/            # Maintenance scripts
+          ├── logs/               # Application logs
+          └── secrets/            # Sensitive data
+          ```
+
+          ## Quick Start
+
+          1. Copy environment template:
+             ```bash
+             cp docker/compose/.env.template docker/compose/.env
+             ```
+
+          2. Edit environment variables:
+             ```bash
+             nano docker/compose/.env
+             ```
+
+          3. Start services:
+             ```bash
+             cd docker/compose
+             docker compose up -d
+             ```
+
+          ## Maintenance
+
+          - **Backup**: Run `scripts/backup.sh`
+          - **Update**: Run `scripts/update.sh`
+
+          ## Adding New Applications
+
+          1. Create app directory: `mkdir apps/newapp`
+          2. Create compose file: `docker/compose/newapp.yml`
+          3. Add data directory: `mkdir data/newapp`
+
+    # =========================================================================
+    # TARGET CONFIGURATION
+    # =========================================================================
+    target_guests: []
+    auto_discover: true
+    target_user: "root"
+
+  # ---------------------------------------------------------------------------
+  # TASKS
+  # ---------------------------------------------------------------------------
+  tasks:
+
+    # =========================================================================
+    # TASK 1: Introduction
+    # =========================================================================
+    - name: Display playbook introduction
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  Homelab Folder Structure Setup"
+          - "============================================"
+          - "  Base path: {{ homelab_root }}"
+          - "  Directories to create: {{ directories | length }}"
+          - "  Template files: {{ template_files | length }}"
+          - "============================================"
+
+    # =========================================================================
+    # TASK 2: Auto-Discover Guests
+    # =========================================================================
+    - name: Auto-discover running guests
+      when: target_guests | length == 0 and auto_discover
+      block:
+        - name: Get running containers
+          ansible.builtin.shell:
+            cmd: "pct list | grep running | awk '{print $1}'"
+          register: running_containers
+          changed_when: false
+          failed_when: false
+
+        - name: Get running VMs
+          ansible.builtin.shell:
+            cmd: "qm list | grep running | awk '{print $1}'"
+          register: running_vms
+          changed_when: false
+          failed_when: false
+
+        - name: Build target list
+          ansible.builtin.set_fact:
+            container_targets: "{{ running_containers.stdout_lines | default([]) | map('regex_replace', '^(.*)$', '{\"id\": \\1, \"type\": \"ct\"}') | map('from_json') | list }}"
+          when: running_containers.stdout_lines | default([]) | length > 0
+
+        - name: Build VM targets
+          ansible.builtin.set_fact:
+            vm_targets: "{{ running_vms.stdout_lines | default([]) | map('regex_replace', '^(.*)$', '{\"id\": \\1, \"type\": \"vm\"}') | map('from_json') | list }}"
+          when: running_vms.stdout_lines | default([]) | length > 0
+
+        - name: Combine targets
+          ansible.builtin.set_fact:
+            target_guests: "{{ (container_targets | default([])) + (vm_targets | default([])) }}"
+
+        - name: Display targets
+          ansible.builtin.debug:
+            msg: "Will configure: {{ target_guests | map(attribute='id') | list }}"
+
+    - name: Check for targets
+      ansible.builtin.fail:
+        msg: "No target guests found. Start containers/VMs or specify targets."
+      when: target_guests | length == 0
+
+    # =========================================================================
+    # TASK 3: Create Directory Structure on Containers
+    # =========================================================================
+    - name: Create directory structure on containers
+      when: item.0.type == 'ct'
+      block:
+        - name: "Container {{ item.0.id }}: Create {{ item.1.path }}"
+          ansible.builtin.shell:
+            cmd: |
+              pct exec {{ item.0.id }} -- mkdir -p "{{ homelab_root }}/{{ item.1.path }}"
+              pct exec {{ item.0.id }} -- chmod {{ item.1.mode | default('0755') }} "{{ homelab_root }}/{{ item.1.path }}"
+          register: mkdir_result
+
+      # Loop over combination of guests and directories
+      loop: "{{ target_guests | selectattr('type', 'equalto', 'ct') | product(directories) | list }}"
+      loop_control:
+        label: "CT {{ item.0.id }}: {{ item.1.path }}"
+
+    - name: Create template files on containers
+      when: item.0.type == 'ct'
+      ansible.builtin.shell:
+        cmd: |
+          pct exec {{ item.0.id }} -- sh -c 'cat > "{{ homelab_root }}/{{ item.1.path }}" << "ENDOFFILE"
+          {{ item.1.content }}
+          ENDOFFILE'
+          pct exec {{ item.0.id }} -- chmod {{ item.1.mode | default('0644') }} "{{ homelab_root }}/{{ item.1.path }}"
+      loop: "{{ target_guests | selectattr('type', 'equalto', 'ct') | product(template_files) | list }}"
+      loop_control:
+        label: "CT {{ item.0.id }}: {{ item.1.path }}"
+
+    # =========================================================================
+    # TASK 4: Create Directory Structure on VMs
+    # =========================================================================
+    - name: Create directory structure on VMs
+      when: item.0.type == 'vm'
+      block:
+        - name: "VM {{ item.0.id }}: Check guest agent"
+          ansible.builtin.command:
+            cmd: "qm guest cmd {{ item.0.id }} ping"
+          register: vm_agent
+          failed_when: false
+          changed_when: false
+
+        - name: "VM {{ item.0.id }}: Create {{ item.1.path }}"
+          ansible.builtin.shell:
+            cmd: |
+              qm guest exec {{ item.0.id }} -- mkdir -p "{{ homelab_root }}/{{ item.1.path }}"
+              qm guest exec {{ item.0.id }} -- chmod {{ item.1.mode | default('0755') }} "{{ homelab_root }}/{{ item.1.path }}"
+          when: vm_agent.rc == 0
+
+      loop: "{{ target_guests | selectattr('type', 'equalto', 'vm') | product(directories) | list }}"
+      loop_control:
+        label: "VM {{ item.0.id }}: {{ item.1.path }}"
+
+    # =========================================================================
+    # TASK 5: Verify Structure
+    # =========================================================================
+    - name: Verify directory structure on containers
+      ansible.builtin.shell:
+        cmd: |
+          pct exec {{ item.id }} -- ls -la "{{ homelab_root }}"
+      register: verify_result
+      changed_when: false
+      loop: "{{ target_guests | selectattr('type', 'equalto', 'ct') | list }}"
+      loop_control:
+        label: "Container {{ item.id }}"
+
+    - name: Display verification results
+      ansible.builtin.debug:
+        msg: "{{ item.stdout_lines }}"
+        verbosity: 1
+      loop: "{{ verify_result.results }}"
+      loop_control:
+        label: "Container {{ item.item.id }}"
+
+    # =========================================================================
+    # TASK 6: Display Directory Descriptions
+    # =========================================================================
+    - name: Display directory structure guide
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  Directory Structure Created!"
+          - "============================================"
+          - ""
+          - "DIRECTORY PURPOSES:"
+          - "{% for dir in directories %}"
+          - "  {{ homelab_root }}/{{ dir.path }}/"
+          - "    └─ {{ dir.description }}"
+          - "{% endfor %}"
+          - ""
+          - "============================================"
+
+    # =========================================================================
+    # TASK 7: Final Summary
+    # =========================================================================
+    - name: Display completion summary
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  Homelab Structure Setup Complete"
+          - "============================================"
+          - ""
+          - "CONFIGURED GUESTS:"
+          - "{% for guest in target_guests %}  {{ guest.type | upper }} {{ guest.id }}\n{% endfor %}"
+          - ""
+          - "BASE PATH: {{ homelab_root }}"
+          - ""
+          - "TEMPLATE FILES CREATED:"
+          - "{% for file in template_files %}  {{ file.path }}\n{% endfor %}"
+          - ""
+          - "NEXT STEPS:"
+          - "  1. Copy .env.template to .env and configure"
+          - "  2. Add your Docker compose files to docker/compose/"
+          - "  3. Set up your applications in apps/"
+          - "  4. Run backup.sh to test backups"
+          - ""
+          - "ACCESS THE STRUCTURE:"
+          - "  Container: pct enter <id> then cd {{ homelab_root }}"
+          - "  VM: ssh root@<ip> then cd {{ homelab_root }}"
+          - "============================================"

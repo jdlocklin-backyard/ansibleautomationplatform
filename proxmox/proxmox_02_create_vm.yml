@@ -1,0 +1,453 @@
+---
+# =============================================================================
+# PROXMOX PLAYBOOK 02: Create Virtual Machine (QEMU/KVM)
+# =============================================================================
+# IMPORTANT: This playbook runs ONLY on the Proxmox server itself!
+#            Do NOT run this from a remote Ansible control node.
+#            Install Ansible directly on your Proxmox host.
+#
+# WHAT YOU'LL LEARN:
+#   - How to create full VMs using Proxmox's 'qm' command
+#   - Difference between containers (pct) and VMs (qm)
+#   - VM configuration options (CPU, memory, disk, network)
+#   - Cloud-init for automated VM configuration
+#   - Working with ISO images and templates
+#
+# CONTAINERS vs VMS:
+#   - Containers (LXC): Lightweight, share host kernel, less isolation
+#   - VMs (QEMU/KVM): Full virtualization, own kernel, complete isolation
+#   - Use containers for Linux apps, VMs for Windows or kernel-specific needs
+#
+# PREREQUISITES:
+#   - Ansible installed on the Proxmox server (see README_PROXMOX.md)
+#   - ISO image uploaded OR cloud-init template created
+#   - Sufficient storage space
+#
+# RUN THIS PLAYBOOK:
+#   ansible-playbook proxmox/proxmox_02_create_vm.yml
+#
+# WITH CUSTOM VARIABLES:
+#   ansible-playbook proxmox/proxmox_02_create_vm.yml \
+#     -e "vm_id=200 vm_name=webserver vm_memory=4096"
+# =============================================================================
+
+- name: Proxmox - Create Virtual Machine (QEMU/KVM)
+  # ---------------------------------------------------------------------------
+  # HOST CONFIGURATION
+  # ---------------------------------------------------------------------------
+  # This playbook runs LOCALLY on the Proxmox server
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  # Root privileges required for qm commands
+  become: true
+
+  # ---------------------------------------------------------------------------
+  # VM CONFIGURATION VARIABLES
+  # ---------------------------------------------------------------------------
+  vars:
+    # =========================================================================
+    # VM IDENTITY
+    # =========================================================================
+    # vm_id: Unique numeric ID for the VM (100-999999)
+    # VMs and containers share the same ID namespace - don't overlap!
+    # Check existing IDs with: qm list && pct list
+    vm_id: 200
+
+    # vm_name: The name for the VM (appears in Proxmox UI)
+    vm_name: "test-vm"
+
+    # =========================================================================
+    # INSTALLATION METHOD
+    # =========================================================================
+    # vm_install_method: How to install the OS
+    # Options:
+    #   - 'iso': Boot from ISO image (manual installation)
+    #   - 'clone': Clone from existing template (recommended)
+    #   - 'cloudinit': Use cloud-init enabled template (fastest)
+    vm_install_method: "cloudinit"
+
+    # vm_clone_source: Template VM ID to clone from (for clone/cloudinit methods)
+    # Create a template first: qm template <vmid>
+    vm_clone_source: 9000
+
+    # vm_iso: ISO image path (for iso method)
+    # Upload ISOs to: /var/lib/vz/template/iso/
+    # List ISOs with: ls /var/lib/vz/template/iso/
+    vm_iso: "local:iso/debian-12.0.0-amd64-netinst.iso"
+
+    # =========================================================================
+    # HARDWARE CONFIGURATION
+    # =========================================================================
+    # vm_sockets: Number of CPU sockets (usually 1)
+    vm_sockets: 1
+
+    # vm_cores: Number of cores per socket
+    vm_cores: 2
+
+    # vm_memory: RAM in MB
+    # VMs need more memory than containers - they run their own kernel
+    vm_memory: 2048
+
+    # vm_balloon: Minimum memory for ballooning (0 to disable)
+    # Ballooning allows dynamic memory adjustment
+    vm_balloon: 0
+
+    # =========================================================================
+    # STORAGE CONFIGURATION
+    # =========================================================================
+    # vm_storage: Where to store the VM disk
+    vm_storage: "local-lvm"
+
+    # vm_disk_size: Size of the primary disk (e.g., "32G")
+    vm_disk_size: "32G"
+
+    # vm_disk_type: Disk bus type
+    # Options: 'scsi' (recommended), 'virtio', 'ide', 'sata'
+    vm_disk_type: "scsi"
+
+    # vm_scsihw: SCSI controller type
+    # 'virtio-scsi-pci' is modern and fast
+    vm_scsihw: "virtio-scsi-pci"
+
+    # =========================================================================
+    # NETWORK CONFIGURATION
+    # =========================================================================
+    # vm_bridge: Network bridge to connect to
+    vm_bridge: "vmbr0"
+
+    # vm_net_model: Network card model
+    # 'virtio' is fastest but requires drivers (included in Linux)
+    vm_net_model: "virtio"
+
+    # vm_vlan: VLAN tag (optional, leave empty for no VLAN)
+    vm_vlan: ""
+
+    # =========================================================================
+    # CLOUD-INIT SETTINGS (for cloudinit method)
+    # =========================================================================
+    # These are used when vm_install_method is 'cloudinit'
+
+    # ci_user: Default user to create
+    ci_user: "admin"
+
+    # ci_password: Password for the user (change this!)
+    ci_password: "changeme123"
+
+    # ci_ssh_key: Path to SSH public key to inject
+    ci_ssh_key: "/root/.ssh/id_rsa.pub"
+
+    # ci_ip: IP address (use 'dhcp' or static like '192.168.1.100/24')
+    ci_ip: "dhcp"
+
+    # ci_gateway: Gateway IP (required for static IP)
+    ci_gateway: ""
+
+    # ci_nameserver: DNS server
+    ci_nameserver: "8.8.8.8"
+
+    # =========================================================================
+    # BOOT AND DISPLAY
+    # =========================================================================
+    # vm_boot_order: Boot device order
+    # c=first disk, d=CD-ROM, n=network
+    vm_boot_order: "order=scsi0"
+
+    # vm_display: Display type for console
+    # Options: 'std', 'cirrus', 'vmware', 'qxl', 'serial0', 'serial1'
+    vm_display: "std"
+
+    # vm_ostype: OS type for optimizations
+    # Options: 'l26' (Linux 2.6+), 'win10', 'win11', 'other'
+    vm_ostype: "l26"
+
+    # =========================================================================
+    # STARTUP OPTIONS
+    # =========================================================================
+    # vm_start_on_create: Start VM immediately after creation
+    vm_start_on_create: true
+
+    # vm_onboot: Start VM when Proxmox boots
+    vm_onboot: true
+
+    # vm_agent: Enable QEMU guest agent (install qemu-guest-agent in VM)
+    # Required for proper shutdown and IP detection
+    vm_agent: true
+
+  # ---------------------------------------------------------------------------
+  # TASKS
+  # ---------------------------------------------------------------------------
+  tasks:
+
+    # =========================================================================
+    # TASK 1: Display Configuration Summary
+    # =========================================================================
+    - name: Display VM configuration
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  Creating Virtual Machine"
+          - "============================================"
+          - "  ID:          {{ vm_id }}"
+          - "  Name:        {{ vm_name }}"
+          - "  Method:      {{ vm_install_method }}"
+          - "  CPUs:        {{ vm_sockets }} socket(s) x {{ vm_cores }} core(s)"
+          - "  Memory:      {{ vm_memory }}MB"
+          - "  Disk:        {{ vm_disk_size }} on {{ vm_storage }}"
+          - "  Network:     {{ vm_bridge }} ({{ vm_net_model }})"
+          - "============================================"
+
+    # =========================================================================
+    # TASK 2: Check if VM Already Exists
+    # =========================================================================
+    - name: Check if VM ID already exists
+      ansible.builtin.command:
+        cmd: "qm status {{ vm_id }}"
+      register: vm_exists_check
+      failed_when: false
+      changed_when: false
+
+    - name: Abort if VM already exists
+      ansible.builtin.fail:
+        msg: |
+          VM {{ vm_id }} already exists!
+          Current status: {{ vm_exists_check.stdout | default('unknown') }}
+
+          Options:
+            1. Use a different vm_id: -e "vm_id=201"
+            2. Delete existing VM: qm destroy {{ vm_id }}
+            3. Stop and remove: qm stop {{ vm_id }} && qm destroy {{ vm_id }}
+      when: vm_exists_check.rc == 0
+
+    # =========================================================================
+    # TASK 3: Create VM from Clone (cloudinit or clone method)
+    # =========================================================================
+    - name: Clone VM from template
+      when: vm_install_method in ['clone', 'cloudinit']
+      block:
+        - name: Verify source template exists
+          ansible.builtin.command:
+            cmd: "qm status {{ vm_clone_source }}"
+          register: template_check
+          failed_when: template_check.rc != 0
+          changed_when: false
+
+        - name: Clone the template
+          ansible.builtin.command:
+            # qm clone <source> <newid> --name <name> --full
+            # --full creates a full copy (not linked clone)
+            cmd: >-
+              qm clone {{ vm_clone_source }} {{ vm_id }}
+              --name {{ vm_name }}
+              --full
+          register: clone_result
+
+        - name: Display clone result
+          ansible.builtin.debug:
+            msg: "{{ clone_result.stdout | default('Clone completed') }}"
+
+    # =========================================================================
+    # TASK 4: Create VM from Scratch (iso method)
+    # =========================================================================
+    - name: Create VM for ISO installation
+      when: vm_install_method == 'iso'
+      block:
+        - name: Create new VM
+          ansible.builtin.command:
+            cmd: >-
+              qm create {{ vm_id }}
+              --name {{ vm_name }}
+              --ostype {{ vm_ostype }}
+              --sockets {{ vm_sockets }}
+              --cores {{ vm_cores }}
+              --memory {{ vm_memory }}
+              --balloon {{ vm_balloon }}
+              --scsihw {{ vm_scsihw }}
+              --net0 {{ vm_net_model }},bridge={{ vm_bridge }}{% if vm_vlan %},tag={{ vm_vlan }}{% endif %}
+
+              --vga {{ vm_display }}
+              {% if vm_agent %}--agent enabled=1{% endif %}
+              {% if vm_onboot %}--onboot 1{% endif %}
+
+          register: create_result
+
+        - name: Add disk to VM
+          ansible.builtin.command:
+            cmd: "qm set {{ vm_id }} --scsi0 {{ vm_storage }}:{{ vm_disk_size }}"
+
+        - name: Attach ISO to VM
+          ansible.builtin.command:
+            cmd: "qm set {{ vm_id }} --ide2 {{ vm_iso }},media=cdrom"
+
+        - name: Set boot order to CD-ROM first (for installation)
+          ansible.builtin.command:
+            cmd: "qm set {{ vm_id }} --boot order=ide2;scsi0"
+
+        - name: Display installation instructions
+          ansible.builtin.debug:
+            msg:
+              - "============================================"
+              - "  ISO Installation Required"
+              - "============================================"
+              - "  1. Start the VM: qm start {{ vm_id }}"
+              - "  2. Open console in Proxmox web UI"
+              - "  3. Complete OS installation"
+              - "  4. After install, change boot order:"
+              - "     qm set {{ vm_id }} --boot order=scsi0"
+              - "  5. Remove ISO:"
+              - "     qm set {{ vm_id }} --ide2 none,media=cdrom"
+              - "============================================"
+
+    # =========================================================================
+    # TASK 5: Configure VM Hardware (for cloned VMs)
+    # =========================================================================
+    - name: Configure VM hardware
+      when: vm_install_method in ['clone', 'cloudinit']
+      block:
+        - name: Set CPU configuration
+          ansible.builtin.command:
+            cmd: "qm set {{ vm_id }} --sockets {{ vm_sockets }} --cores {{ vm_cores }}"
+
+        - name: Set memory configuration
+          ansible.builtin.command:
+            cmd: "qm set {{ vm_id }} --memory {{ vm_memory }} --balloon {{ vm_balloon }}"
+
+        - name: Resize disk if needed
+          ansible.builtin.command:
+            cmd: "qm resize {{ vm_id }} scsi0 {{ vm_disk_size }}"
+          # May fail if disk is already larger, that's OK
+          failed_when: false
+
+        - name: Enable QEMU agent
+          ansible.builtin.command:
+            cmd: "qm set {{ vm_id }} --agent enabled=1"
+          when: vm_agent
+
+    # =========================================================================
+    # TASK 6: Configure Cloud-Init
+    # =========================================================================
+    - name: Configure cloud-init
+      when: vm_install_method == 'cloudinit'
+      block:
+        - name: Check if SSH public key exists
+          ansible.builtin.stat:
+            path: "{{ ci_ssh_key }}"
+          register: ssh_key_stat
+
+        - name: Read SSH public key
+          ansible.builtin.slurp:
+            src: "{{ ci_ssh_key }}"
+          register: ssh_key_content
+          when: ssh_key_stat.stat.exists
+
+        # Cloud-init IP configuration
+        - name: Set cloud-init IP configuration
+          ansible.builtin.command:
+            cmd: >-
+              qm set {{ vm_id }}
+              --ipconfig0 ip={{ ci_ip }}{% if ci_ip != 'dhcp' %},gw={{ ci_gateway }}{% endif %}
+
+          when: ci_ip is defined
+
+        - name: Set cloud-init user
+          ansible.builtin.command:
+            cmd: "qm set {{ vm_id }} --ciuser {{ ci_user }}"
+
+        - name: Set cloud-init password
+          ansible.builtin.command:
+            cmd: "qm set {{ vm_id }} --cipassword {{ ci_password }}"
+
+        - name: Set cloud-init SSH keys
+          ansible.builtin.command:
+            cmd: "qm set {{ vm_id }} --sshkeys {{ ci_ssh_key }}"
+          when: ssh_key_stat.stat.exists
+
+        - name: Set cloud-init nameserver
+          ansible.builtin.command:
+            cmd: "qm set {{ vm_id }} --nameserver {{ ci_nameserver }}"
+          when: ci_nameserver is defined and ci_nameserver != ""
+
+        - name: Regenerate cloud-init drive
+          ansible.builtin.command:
+            cmd: "qm cloudinit update {{ vm_id }}"
+
+    # =========================================================================
+    # TASK 7: Set Boot Order and Onboot
+    # =========================================================================
+    - name: Set boot order
+      ansible.builtin.command:
+        cmd: "qm set {{ vm_id }} --boot {{ vm_boot_order }}"
+      when: vm_install_method != 'iso'
+
+    - name: Set onboot flag
+      ansible.builtin.command:
+        cmd: "qm set {{ vm_id }} --onboot {{ '1' if vm_onboot else '0' }}"
+
+    # =========================================================================
+    # TASK 8: Start the VM
+    # =========================================================================
+    - name: Start the VM
+      ansible.builtin.command:
+        cmd: "qm start {{ vm_id }}"
+      when: vm_start_on_create and vm_install_method != 'iso'
+      register: start_result
+
+    - name: Wait for VM to start
+      ansible.builtin.command:
+        cmd: "qm status {{ vm_id }}"
+      register: status_check
+      until: "'running' in status_check.stdout"
+      retries: 10
+      delay: 3
+      when: vm_start_on_create and vm_install_method != 'iso'
+      changed_when: false
+
+    # =========================================================================
+    # TASK 9: Get VM IP Address (if agent is running)
+    # =========================================================================
+    - name: Wait for QEMU guest agent
+      ansible.builtin.pause:
+        seconds: 30
+      when: vm_start_on_create and vm_agent and vm_install_method == 'cloudinit'
+
+    - name: Get VM IP address from guest agent
+      ansible.builtin.command:
+        cmd: "qm guest cmd {{ vm_id }} network-get-interfaces"
+      register: vm_network
+      when: vm_start_on_create and vm_agent and vm_install_method == 'cloudinit'
+      failed_when: false
+      changed_when: false
+
+    # =========================================================================
+    # TASK 10: Final Summary
+    # =========================================================================
+    - name: Display completion summary
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  Virtual Machine Created Successfully!"
+          - "============================================"
+          - "  ID:        {{ vm_id }}"
+          - "  Name:      {{ vm_name }}"
+          - "  Method:    {{ vm_install_method }}"
+          - "  CPUs:      {{ vm_sockets * vm_cores }}"
+          - "  Memory:    {{ vm_memory }}MB"
+          - "  Disk:      {{ vm_disk_size }}"
+          - "============================================"
+          - ""
+          - "USEFUL COMMANDS:"
+          - "  Console:   qm terminal {{ vm_id }} (if serial enabled)"
+          - "  VNC:       Use Proxmox web UI for graphical console"
+          - "  Stop:      qm stop {{ vm_id }}"
+          - "  Start:     qm start {{ vm_id }}"
+          - "  Shutdown:  qm shutdown {{ vm_id }} (graceful, needs agent)"
+          - "  Destroy:   qm destroy {{ vm_id }}"
+          - "  Config:    qm config {{ vm_id }}"
+          - "  Snapshot:  qm snapshot {{ vm_id }} <name>"
+          - ""
+          - "NEXT STEPS:"
+          - "  1. Install qemu-guest-agent in the VM for better control"
+          - "  2. Run proxmox_03_prep_ssh_keys.yml to enable SSH"
+          - "  3. Run proxmox_05_homelab_structure.yml for folder setup"
+          - "============================================"

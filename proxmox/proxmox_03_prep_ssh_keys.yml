@@ -1,0 +1,395 @@
+---
+# =============================================================================
+# PROXMOX PLAYBOOK 03: Prepare SSH Keys for Target Machines
+# =============================================================================
+# IMPORTANT: This playbook runs ONLY on the Proxmox server itself!
+#            Do NOT run this from a remote Ansible control node.
+#            Install Ansible directly on your Proxmox host.
+#
+# WHAT YOU'LL LEARN:
+#   - How to use 'pct exec' and 'qm guest exec' to run commands in guests
+#   - Copying SSH public keys to containers and VMs
+#   - Understanding SSH key-based authentication
+#   - How Proxmox interacts with guest operating systems
+#   - Batch operations across multiple guests
+#
+# HOW PROXMOX COMMUNICATES WITH GUESTS:
+#   - Containers (LXC): Direct access via 'pct exec' - always works
+#   - VMs: Requires QEMU guest agent installed, uses 'qm guest cmd'
+#   - Alternative for VMs: Use 'sshpass' if guest agent not available
+#
+# PREREQUISITES:
+#   - Ansible installed on the Proxmox server (see README_PROXMOX.md)
+#   - SSH key pair exists on Proxmox host (will be created if not)
+#   - Containers: Already running
+#   - VMs: QEMU guest agent installed and running
+#
+# RUN THIS PLAYBOOK:
+#   ansible-playbook proxmox/proxmox_03_prep_ssh_keys.yml
+#
+# FOR SPECIFIC GUESTS:
+#   ansible-playbook proxmox/proxmox_03_prep_ssh_keys.yml \
+#     -e '{"target_guests": [{"id": 100, "type": "ct"}, {"id": 200, "type": "vm"}]}'
+# =============================================================================
+
+- name: Proxmox - Prepare SSH Keys for Target Machines
+  # ---------------------------------------------------------------------------
+  # HOST CONFIGURATION
+  # ---------------------------------------------------------------------------
+  # Running locally on the Proxmox server
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  # Root privileges required
+  become: true
+
+  # ---------------------------------------------------------------------------
+  # VARIABLES
+  # ---------------------------------------------------------------------------
+  vars:
+    # =========================================================================
+    # SSH KEY CONFIGURATION
+    # =========================================================================
+    # ssh_key_path: Path to the SSH private key
+    # The public key will be at {{ ssh_key_path }}.pub
+    ssh_key_path: "/root/.ssh/id_rsa"
+
+    # ssh_key_type: Type of key to generate if missing
+    # Options: 'rsa', 'ed25519' (ed25519 is newer and more secure)
+    ssh_key_type: "ed25519"
+
+    # ssh_key_bits: Key size for RSA keys (ignored for ed25519)
+    ssh_key_bits: 4096
+
+    # ssh_key_comment: Comment for the key (helps identify it)
+    ssh_key_comment: "proxmox-admin@{{ ansible_hostname }}"
+
+    # =========================================================================
+    # TARGET CONFIGURATION
+    # =========================================================================
+    # target_guests: List of containers/VMs to configure
+    # Each entry needs:
+    #   - id: The VMID/CTID number
+    #   - type: Either 'ct' (container) or 'vm' (virtual machine)
+    #   - user: (optional) Target user, defaults to 'root'
+    #
+    # Override with -e to specify specific targets
+    target_guests: []
+    #   - { id: 100, type: "ct", user: "root" }
+    #   - { id: 101, type: "ct", user: "root" }
+    #   - { id: 200, type: "vm", user: "root" }
+
+    # auto_discover: If true and target_guests is empty, discover all running guests
+    auto_discover: true
+
+    # target_user: Default user to configure SSH for
+    target_user: "root"
+
+  # ---------------------------------------------------------------------------
+  # TASKS
+  # ---------------------------------------------------------------------------
+  tasks:
+
+    # =========================================================================
+    # TASK 1: Display Introduction
+    # =========================================================================
+    - name: Display playbook introduction
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  SSH Key Preparation for Proxmox Guests"
+          - "============================================"
+          - "  This playbook will:"
+          - "    1. Ensure SSH key pair exists on Proxmox host"
+          - "    2. Copy public key to target containers/VMs"
+          - "    3. Set correct permissions on target machines"
+          - "============================================"
+
+    # =========================================================================
+    # TASK 2: Check if SSH Key Exists
+    # =========================================================================
+    # First, let's see if we already have an SSH key pair
+    - name: Check if SSH private key exists
+      ansible.builtin.stat:
+        path: "{{ ssh_key_path }}"
+      register: ssh_private_key
+
+    - name: Check if SSH public key exists
+      ansible.builtin.stat:
+        path: "{{ ssh_key_path }}.pub"
+      register: ssh_public_key
+
+    # =========================================================================
+    # TASK 3: Generate SSH Key if Missing
+    # =========================================================================
+    # Generate a new key pair if none exists
+    - name: Generate SSH key pair if missing
+      when: not ssh_private_key.stat.exists
+      block:
+        # Ensure .ssh directory exists with correct permissions
+        - name: Ensure .ssh directory exists
+          ansible.builtin.file:
+            path: "{{ ssh_key_path | dirname }}"
+            state: directory
+            mode: '0700'
+            owner: root
+            group: root
+
+        # Generate the key pair
+        # ssh-keygen -t <type> -b <bits> -f <file> -N "" -C "<comment>"
+        # -N "" means no passphrase (required for automation)
+        - name: Generate new SSH key pair
+          ansible.builtin.command:
+            cmd: >-
+              ssh-keygen
+              -t {{ ssh_key_type }}
+              {% if ssh_key_type == 'rsa' %}-b {{ ssh_key_bits }}{% endif %}
+              -f {{ ssh_key_path }}
+              -N ""
+              -C "{{ ssh_key_comment }}"
+          register: keygen_result
+
+        - name: Display key generation result
+          ansible.builtin.debug:
+            msg:
+              - "SSH key pair generated:"
+              - "  Private key: {{ ssh_key_path }}"
+              - "  Public key:  {{ ssh_key_path }}.pub"
+              - "  Type: {{ ssh_key_type }}"
+
+    # =========================================================================
+    # TASK 4: Read the Public Key
+    # =========================================================================
+    - name: Read SSH public key content
+      ansible.builtin.slurp:
+        src: "{{ ssh_key_path }}.pub"
+      register: ssh_public_key_content
+
+    - name: Display public key
+      ansible.builtin.debug:
+        msg: "Public key: {{ ssh_public_key_content.content | b64decode | trim }}"
+        verbosity: 1
+
+    # =========================================================================
+    # TASK 5: Auto-Discover Running Guests
+    # =========================================================================
+    - name: Auto-discover running guests
+      when: target_guests | length == 0 and auto_discover
+      block:
+        # Get list of running containers
+        - name: Get list of running containers
+          ansible.builtin.shell:
+            # 'pct list' shows all containers
+            # We filter for 'running' status and extract the VMID
+            cmd: "pct list | grep running | awk '{print $1}'"
+          register: running_containers
+          changed_when: false
+          failed_when: false
+
+        # Get list of running VMs
+        - name: Get list of running VMs
+          ansible.builtin.shell:
+            # 'qm list' shows all VMs
+            cmd: "qm list | grep running | awk '{print $1}'"
+          register: running_vms
+          changed_when: false
+          failed_when: false
+
+        # Build the target list from discovered guests
+        - name: Build target list from discovered guests
+          ansible.builtin.set_fact:
+            discovered_guests: >-
+              {{
+                (running_containers.stdout_lines | default([]) | map('int') | map('community.general.dict_kw', id='id', type='ct') | list) +
+                (running_vms.stdout_lines | default([]) | map('int') | map('community.general.dict_kw', id='id', type='vm') | list)
+              }}
+
+        # Simpler approach without custom filter
+        - name: Build container target list
+          ansible.builtin.set_fact:
+            container_targets: "{{ running_containers.stdout_lines | default([]) | map('regex_replace', '^(.*)$', '{\"id\": \\1, \"type\": \"ct\"}') | map('from_json') | list }}"
+          when: running_containers.stdout_lines | default([]) | length > 0
+
+        - name: Build VM target list
+          ansible.builtin.set_fact:
+            vm_targets: "{{ running_vms.stdout_lines | default([]) | map('regex_replace', '^(.*)$', '{\"id\": \\1, \"type\": \"vm\"}') | map('from_json') | list }}"
+          when: running_vms.stdout_lines | default([]) | length > 0
+
+        - name: Combine target lists
+          ansible.builtin.set_fact:
+            target_guests: "{{ (container_targets | default([])) + (vm_targets | default([])) }}"
+
+        - name: Display discovered guests
+          ansible.builtin.debug:
+            msg:
+              - "Discovered running guests:"
+              - "  Containers: {{ running_containers.stdout_lines | default([]) | join(', ') or 'none' }}"
+              - "  VMs: {{ running_vms.stdout_lines | default([]) | join(', ') or 'none' }}"
+
+    # =========================================================================
+    # TASK 6: Validate Target List
+    # =========================================================================
+    - name: Check if we have targets
+      ansible.builtin.fail:
+        msg: |
+          No target guests specified or discovered!
+
+          Either:
+            1. Provide targets: -e '{"target_guests": [{"id": 100, "type": "ct"}]}'
+            2. Start some containers/VMs and enable auto_discover
+            3. For VMs: Ensure QEMU guest agent is installed and running
+      when: target_guests | length == 0
+
+    - name: Display targets to configure
+      ansible.builtin.debug:
+        msg: "Will configure SSH keys for: {{ target_guests | map(attribute='id') | list }}"
+
+    # =========================================================================
+    # TASK 7: Copy SSH Key to Containers
+    # =========================================================================
+    # For containers, we use 'pct exec' to run commands directly
+    - name: Configure SSH keys for containers
+      when: item.type == 'ct'
+      block:
+        - name: "Container {{ item.id }}: Check if container is running"
+          ansible.builtin.command:
+            cmd: "pct status {{ item.id }}"
+          register: ct_status
+          failed_when: "'running' not in ct_status.stdout"
+          changed_when: false
+
+        - name: "Container {{ item.id }}: Create .ssh directory"
+          ansible.builtin.command:
+            # 'pct exec <vmid> -- <command>' runs a command inside the container
+            # This is direct execution, no SSH needed!
+            cmd: "pct exec {{ item.id }} -- mkdir -p /{{ item.user | default(target_user) }}/.ssh"
+          register: mkdir_result
+
+        - name: "Container {{ item.id }}: Set .ssh directory permissions"
+          ansible.builtin.command:
+            cmd: "pct exec {{ item.id }} -- chmod 700 /{{ item.user | default(target_user) }}/.ssh"
+
+        # We need to write the key to the container
+        # Option 1: Use pct push to copy a file
+        # Option 2: Use pct exec with echo (simpler for single line)
+        - name: "Container {{ item.id }}: Add SSH public key to authorized_keys"
+          ansible.builtin.shell:
+            # Using shell to handle the key content properly
+            # We echo the key and append to authorized_keys
+            cmd: |
+              pct exec {{ item.id }} -- sh -c 'echo "{{ ssh_public_key_content.content | b64decode | trim }}" >> /{{ item.user | default(target_user) }}/.ssh/authorized_keys'
+
+        - name: "Container {{ item.id }}: Remove duplicate keys from authorized_keys"
+          ansible.builtin.shell:
+            cmd: |
+              pct exec {{ item.id }} -- sh -c 'sort -u /{{ item.user | default(target_user) }}/.ssh/authorized_keys -o /{{ item.user | default(target_user) }}/.ssh/authorized_keys'
+
+        - name: "Container {{ item.id }}: Set authorized_keys permissions"
+          ansible.builtin.command:
+            cmd: "pct exec {{ item.id }} -- chmod 600 /{{ item.user | default(target_user) }}/.ssh/authorized_keys"
+
+        - name: "Container {{ item.id }}: Get container IP for verification"
+          ansible.builtin.shell:
+            cmd: "pct exec {{ item.id }} -- hostname -I | awk '{print $1}'"
+          register: ct_ip
+          changed_when: false
+
+        - name: "Container {{ item.id }}: SSH key configured successfully"
+          ansible.builtin.debug:
+            msg: "Container {{ item.id }}: SSH key added. Test with: ssh {{ item.user | default(target_user) }}@{{ ct_ip.stdout | trim }}"
+
+      # Loop over all containers in target_guests
+      loop: "{{ target_guests | selectattr('type', 'equalto', 'ct') | list }}"
+      loop_control:
+        label: "Container {{ item.id }}"
+
+    # =========================================================================
+    # TASK 8: Copy SSH Key to VMs
+    # =========================================================================
+    # For VMs, we use 'qm guest cmd' which requires the QEMU guest agent
+    - name: Configure SSH keys for VMs
+      when: item.type == 'vm'
+      block:
+        - name: "VM {{ item.id }}: Check if VM is running"
+          ansible.builtin.command:
+            cmd: "qm status {{ item.id }}"
+          register: vm_status
+          failed_when: "'running' not in vm_status.stdout"
+          changed_when: false
+
+        - name: "VM {{ item.id }}: Check if QEMU guest agent is responding"
+          ansible.builtin.command:
+            # 'qm guest cmd <vmid> ping' tests if the agent is working
+            cmd: "qm guest cmd {{ item.id }} ping"
+          register: agent_check
+          failed_when: false
+          changed_when: false
+
+        - name: "VM {{ item.id }}: Guest agent status"
+          ansible.builtin.debug:
+            msg: "Guest agent {{ 'responding' if agent_check.rc == 0 else 'NOT responding - install qemu-guest-agent in the VM' }}"
+
+        # If guest agent is available, use it
+        - name: "VM {{ item.id }}: Configure SSH via guest agent"
+          when: agent_check.rc == 0
+          block:
+            - name: "VM {{ item.id }}: Create .ssh directory via guest agent"
+              ansible.builtin.command:
+                cmd: >-
+                  qm guest exec {{ item.id }} -- mkdir -p /{{ item.user | default(target_user) }}/.ssh
+
+            - name: "VM {{ item.id }}: Write SSH key via guest agent"
+              ansible.builtin.shell:
+                # For VMs, we use qm guest exec to run commands
+                cmd: |
+                  qm guest exec {{ item.id }} -- sh -c 'echo "{{ ssh_public_key_content.content | b64decode | trim }}" >> /{{ item.user | default(target_user) }}/.ssh/authorized_keys'
+
+            - name: "VM {{ item.id }}: Set permissions via guest agent"
+              ansible.builtin.command:
+                cmd: "qm guest exec {{ item.id }} -- chmod 700 /{{ item.user | default(target_user) }}/.ssh"
+
+            - name: "VM {{ item.id }}: Set authorized_keys permissions"
+              ansible.builtin.command:
+                cmd: "qm guest exec {{ item.id }} -- chmod 600 /{{ item.user | default(target_user) }}/.ssh/authorized_keys"
+
+        # Alternative: Use SSH if we already have access
+        - name: "VM {{ item.id }}: Alternative - Use SSH if guest agent unavailable"
+          when: agent_check.rc != 0
+          ansible.builtin.debug:
+            msg:
+              - "Guest agent not available for VM {{ item.id }}"
+              - "Options:"
+              - "  1. Install qemu-guest-agent in the VM and restart"
+              - "  2. Manually copy SSH key via console"
+              - "  3. Use cloud-init when creating the VM"
+
+      loop: "{{ target_guests | selectattr('type', 'equalto', 'vm') | list }}"
+      loop_control:
+        label: "VM {{ item.id }}"
+
+    # =========================================================================
+    # TASK 9: Final Summary
+    # =========================================================================
+    - name: Display completion summary
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  SSH Key Configuration Complete"
+          - "============================================"
+          - "  Key file: {{ ssh_key_path }}.pub"
+          - "  Configured guests: {{ target_guests | map(attribute='id') | list }}"
+          - "============================================"
+          - ""
+          - "TEST SSH ACCESS:"
+          - "  For each guest, run:"
+          - "    ssh root@<guest-ip>"
+          - ""
+          - "  Get container IP: pct exec <id> -- hostname -I"
+          - "  Get VM IP: qm guest cmd <id> network-get-interfaces"
+          - ""
+          - "NEXT STEPS:"
+          - "  1. Test SSH access to each guest"
+          - "  2. Run proxmox_04_configure_passwordless.yml for full setup"
+          - "  3. Add guests to Ansible inventory for remote management"
+          - "============================================"
