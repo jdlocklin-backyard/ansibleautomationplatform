@@ -1,0 +1,373 @@
+---
+# =============================================================================
+# PROXMOX PLAYBOOK 01: Create LXC Container
+# =============================================================================
+# IMPORTANT: This playbook runs ONLY on the Proxmox server itself!
+#            Do NOT run this from a remote Ansible control node.
+#            Install Ansible directly on your Proxmox host.
+#
+# WHAT YOU'LL LEARN:
+#   - How to create LXC containers using Proxmox's 'pct' command
+#   - Using shell/command modules to run Proxmox CLI tools
+#   - Variable organization for container configuration
+#   - Checking for existing resources before creating
+#   - How Proxmox templates and storage work
+#
+# PREREQUISITES:
+#   - Ansible installed on the Proxmox server (see README_PROXMOX.md)
+#   - A container template downloaded (e.g., debian-12-standard)
+#   - Appropriate storage configured (local-lvm, etc.)
+#
+# RUN THIS PLAYBOOK:
+#   ansible-playbook proxmox/proxmox_01_create_container.yml
+#
+# WITH CUSTOM VARIABLES:
+#   ansible-playbook proxmox/proxmox_01_create_container.yml \
+#     -e "ct_id=110 ct_hostname=webserver ct_memory=2048"
+# =============================================================================
+
+- name: Proxmox - Create LXC Container
+  # ---------------------------------------------------------------------------
+  # HOST CONFIGURATION
+  # ---------------------------------------------------------------------------
+  # 'localhost' because we run directly ON the Proxmox server
+  # This playbook does NOT use SSH - it uses local Proxmox commands
+  hosts: localhost
+
+  # 'local' connection means Ansible runs commands on the same machine
+  # No SSH, no network - just local execution
+  connection: local
+
+  # We don't need remote system facts - we're running locally
+  gather_facts: true
+
+  # ---------------------------------------------------------------------------
+  # PRIVILEGE ESCALATION
+  # ---------------------------------------------------------------------------
+  # 'become: true' elevates to root - required for pct commands
+  # Proxmox CLI tools require root privileges
+  become: true
+
+  # ---------------------------------------------------------------------------
+  # CONTAINER CONFIGURATION VARIABLES
+  # ---------------------------------------------------------------------------
+  # All settings for your new container are defined here
+  # Override any of these with -e "variable=value" on the command line
+  vars:
+    # =========================================================================
+    # CONTAINER IDENTITY
+    # =========================================================================
+    # ct_id: Unique numeric ID for the container (100-999999)
+    # Proxmox uses this ID internally to identify the container
+    # Check existing IDs with: pct list
+    ct_id: 100
+
+    # ct_hostname: The hostname for the container
+    # This becomes the container's /etc/hostname
+    ct_hostname: "test-container"
+
+    # =========================================================================
+    # TEMPLATE AND STORAGE
+    # =========================================================================
+    # ct_template: The OS template to use for the container
+    # List available templates with: pveam available
+    # Download templates with: pveam download local <template-name>
+    # List downloaded templates with: pveam list local
+    ct_template: "local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst"
+
+    # ct_storage: Where to store the container's root filesystem
+    # Common options: 'local-lvm', 'local', 'local-zfs'
+    # List storage with: pvesm status
+    ct_storage: "local-lvm"
+
+    # ct_rootfs_size: Size of the root filesystem in GB
+    # Start small - you can resize later with: pct resize <vmid> rootfs +5G
+    ct_rootfs_size: 8
+
+    # =========================================================================
+    # RESOURCE ALLOCATION
+    # =========================================================================
+    # ct_memory: RAM in MB
+    # Containers share memory efficiently - start conservative
+    ct_memory: 512
+
+    # ct_swap: Swap space in MB
+    # Useful for memory spikes, but use sparingly
+    ct_swap: 512
+
+    # ct_cores: Number of CPU cores to allocate
+    # Containers can share cores, so this is a soft limit
+    ct_cores: 1
+
+    # =========================================================================
+    # NETWORK CONFIGURATION
+    # =========================================================================
+    # ct_bridge: The network bridge to connect to
+    # Usually 'vmbr0' is your main network bridge
+    # Check bridges with: brctl show
+    ct_bridge: "vmbr0"
+
+    # ct_ip: IP address for the container
+    # Options:
+    #   - 'dhcp' for automatic IP from DHCP server
+    #   - 'static' IP like '192.168.1.100/24'
+    ct_ip: "dhcp"
+
+    # ct_gateway: Gateway IP (only needed for static IP)
+    # Leave empty for DHCP or set like '192.168.1.1'
+    ct_gateway: ""
+
+    # =========================================================================
+    # ACCESS SETTINGS
+    # =========================================================================
+    # ct_password: Root password for the container
+    # IMPORTANT: Change this! Better yet, use SSH keys (playbook 03)
+    ct_password: "changeme123"
+
+    # ct_ssh_public_key: Path to SSH public key to inject
+    # This allows passwordless SSH access to root
+    ct_ssh_public_key: "/root/.ssh/id_rsa.pub"
+
+    # ct_start_on_create: Whether to start the container immediately
+    ct_start_on_create: true
+
+    # ct_onboot: Whether to start on Proxmox boot
+    ct_onboot: true
+
+    # ct_unprivileged: Create as unprivileged container (more secure)
+    # Set to false if you need direct hardware access or Docker
+    ct_unprivileged: true
+
+  # ---------------------------------------------------------------------------
+  # TASKS - The actual work happens here
+  # ---------------------------------------------------------------------------
+  tasks:
+
+    # =========================================================================
+    # TASK 1: Display Configuration Summary
+    # =========================================================================
+    # Always good to show what we're about to do
+    - name: Display container configuration
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  Creating LXC Container"
+          - "============================================"
+          - "  ID:        {{ ct_id }}"
+          - "  Hostname:  {{ ct_hostname }}"
+          - "  Template:  {{ ct_template }}"
+          - "  Storage:   {{ ct_storage }}"
+          - "  Disk:      {{ ct_rootfs_size }}GB"
+          - "  Memory:    {{ ct_memory }}MB"
+          - "  Cores:     {{ ct_cores }}"
+          - "  Network:   {{ ct_bridge }} ({{ ct_ip }})"
+          - "============================================"
+
+    # =========================================================================
+    # TASK 2: Check if Container Already Exists
+    # =========================================================================
+    # We don't want to accidentally overwrite an existing container!
+    # The 'pct status' command returns exit code 0 if container exists
+    - name: Check if container ID already exists
+      ansible.builtin.command:
+        # 'pct status <vmid>' checks if a container with this ID exists
+        cmd: "pct status {{ ct_id }}"
+      # 'register' saves the command output for later use
+      register: ct_exists_check
+      # 'failed_when: false' prevents playbook failure if container doesn't exist
+      # We WANT it to fail (container doesn't exist) so we can create it
+      failed_when: false
+      # Don't report this as "changed" - it's just a check
+      changed_when: false
+
+    # =========================================================================
+    # TASK 3: Fail if Container Already Exists
+    # =========================================================================
+    # Safety check - stop if we'd overwrite something
+    - name: Abort if container already exists
+      ansible.builtin.fail:
+        msg: |
+          Container {{ ct_id }} already exists!
+          Current status: {{ ct_exists_check.stdout | default('unknown') }}
+
+          Options:
+            1. Use a different ct_id: -e "ct_id=101"
+            2. Delete existing container: pct destroy {{ ct_id }}
+            3. Stop and remove: pct stop {{ ct_id }} && pct destroy {{ ct_id }}
+      # Only fail if the previous check succeeded (container exists)
+      # rc=0 means the container exists
+      when: ct_exists_check.rc == 0
+
+    # =========================================================================
+    # TASK 4: Verify Template Exists
+    # =========================================================================
+    # Check that the template file actually exists
+    - name: Verify template is available
+      ansible.builtin.command:
+        # 'pveam list <storage>' shows downloaded templates
+        cmd: "pveam list local"
+      register: template_list
+      changed_when: false
+
+    - name: Display available templates (for troubleshooting)
+      ansible.builtin.debug:
+        msg: "Available templates: {{ template_list.stdout_lines }}"
+        # Only show with -v flag
+        verbosity: 1
+
+    # =========================================================================
+    # TASK 5: Build the pct create Command
+    # =========================================================================
+    # We'll construct the command string dynamically
+    # This makes it easier to see what's happening
+    - name: Set base pct create command
+      ansible.builtin.set_fact:
+        # The pct create command with all our options
+        # Format: pct create <vmid> <template> [OPTIONS]
+        pct_command: >-
+          pct create {{ ct_id }} {{ ct_template }}
+          --hostname {{ ct_hostname }}
+          --storage {{ ct_storage }}
+          --rootfs {{ ct_storage }}:{{ ct_rootfs_size }}
+          --memory {{ ct_memory }}
+          --swap {{ ct_swap }}
+          --cores {{ ct_cores }}
+          --net0 name=eth0,bridge={{ ct_bridge }}{% if ct_ip == 'dhcp' %},ip=dhcp{% else %},ip={{ ct_ip }}{% if ct_gateway %},gw={{ ct_gateway }}{% endif %}{% endif %}
+
+          --password {{ ct_password }}
+          {% if ct_unprivileged %}--unprivileged 1{% endif %}
+          {% if ct_onboot %}--onboot 1{% endif %}
+
+    # =========================================================================
+    # TASK 6: Display the Command (for Learning)
+    # =========================================================================
+    - name: Show the pct create command that will run
+      ansible.builtin.debug:
+        msg: "{{ pct_command }}"
+
+    # =========================================================================
+    # TASK 7: Create the Container
+    # =========================================================================
+    # This is where the magic happens!
+    - name: Create the LXC container
+      ansible.builtin.shell:
+        # Using shell (not command) because of our complex command string
+        cmd: "{{ pct_command }}"
+      register: create_result
+
+    - name: Display creation result
+      ansible.builtin.debug:
+        msg: "{{ create_result.stdout_lines | default(['Container created successfully']) }}"
+
+    # =========================================================================
+    # TASK 8: Add SSH Public Key (if exists)
+    # =========================================================================
+    # Inject SSH key for passwordless access
+    - name: Check if SSH public key exists
+      ansible.builtin.stat:
+        path: "{{ ct_ssh_public_key }}"
+      register: ssh_key_stat
+
+    - name: Add SSH public key to container
+      when: ssh_key_stat.stat.exists
+      block:
+        # First, get the key content
+        - name: Read SSH public key
+          ansible.builtin.slurp:
+            src: "{{ ct_ssh_public_key }}"
+          register: ssh_key_content
+
+        # Now add it to the container's root authorized_keys
+        # We use pct push to copy content into the container
+        - name: Create .ssh directory in container
+          ansible.builtin.command:
+            cmd: "pct exec {{ ct_id }} -- mkdir -p /root/.ssh"
+          changed_when: true
+
+        - name: Copy SSH key to container
+          ansible.builtin.shell:
+            # Using pct push to copy the key file into the container
+            cmd: "pct push {{ ct_id }} {{ ct_ssh_public_key }} /root/.ssh/authorized_keys"
+          changed_when: true
+
+        - name: Set SSH directory permissions
+          ansible.builtin.command:
+            cmd: "pct exec {{ ct_id }} -- chmod 700 /root/.ssh"
+          changed_when: true
+
+        - name: Set authorized_keys permissions
+          ansible.builtin.command:
+            cmd: "pct exec {{ ct_id }} -- chmod 600 /root/.ssh/authorized_keys"
+          changed_when: true
+
+    # =========================================================================
+    # TASK 9: Start the Container
+    # =========================================================================
+    - name: Start the container
+      ansible.builtin.command:
+        cmd: "pct start {{ ct_id }}"
+      when: ct_start_on_create
+      register: start_result
+
+    # =========================================================================
+    # TASK 10: Wait for Container to be Running
+    # =========================================================================
+    - name: Wait for container to start
+      ansible.builtin.command:
+        cmd: "pct status {{ ct_id }}"
+      register: status_check
+      # Keep trying until we see "running"
+      until: "'running' in status_check.stdout"
+      # Try up to 10 times
+      retries: 10
+      # Wait 3 seconds between attempts
+      delay: 3
+      when: ct_start_on_create
+      changed_when: false
+
+    # =========================================================================
+    # TASK 11: Get Container IP Address
+    # =========================================================================
+    - name: Wait for network to be ready
+      ansible.builtin.pause:
+        seconds: 5
+      when: ct_start_on_create and ct_ip == 'dhcp'
+
+    - name: Get container IP address
+      ansible.builtin.shell:
+        # This extracts the IP address from the container
+        cmd: "pct exec {{ ct_id }} -- hostname -I | awk '{print $1}'"
+      register: container_ip
+      when: ct_start_on_create
+      changed_when: false
+      # May fail if network isn't ready yet
+      failed_when: false
+
+    # =========================================================================
+    # TASK 12: Final Summary
+    # =========================================================================
+    - name: Display completion summary
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  Container Created Successfully!"
+          - "============================================"
+          - "  ID:        {{ ct_id }}"
+          - "  Hostname:  {{ ct_hostname }}"
+          - "  Status:    {{ 'Running' if ct_start_on_create else 'Stopped' }}"
+          - "  IP:        {{ container_ip.stdout | default('Waiting for DHCP...') }}"
+          - "============================================"
+          - ""
+          - "USEFUL COMMANDS:"
+          - "  Connect:   pct enter {{ ct_id }}"
+          - "  Console:   pct console {{ ct_id }}"
+          - "  Stop:      pct stop {{ ct_id }}"
+          - "  Start:     pct start {{ ct_id }}"
+          - "  Destroy:   pct destroy {{ ct_id }}"
+          - "  Config:    pct config {{ ct_id }}"
+          - "  SSH:       ssh root@{{ container_ip.stdout | default('<ip>') }}"
+          - ""
+          - "NEXT STEPS:"
+          - "  1. Run proxmox_03_prep_ssh_keys.yml to enable SSH"
+          - "  2. Run proxmox_05_homelab_structure.yml for folder setup"
+          - "============================================"
