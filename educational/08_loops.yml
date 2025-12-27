@@ -1,0 +1,361 @@
+---
+# =============================================================================
+# PLAYBOOK 08: Loops - Repeating Tasks Efficiently
+# =============================================================================
+# WHAT YOU'LL LEARN:
+#   - The 'loop' keyword for iteration
+#   - Loop with simple lists
+#   - Loop with dictionaries
+#   - Loop control features (index, label, pause)
+#   - Legacy 'with_*' syntax (still common in older playbooks)
+#   - Nested loops
+#
+# REAL-WORLD USE: Creating multiple directories, installing packages, etc.
+#
+# RUN THIS PLAYBOOK:
+#   ansible-playbook educational/08_loops.yml
+# =============================================================================
+
+- name: Loops - Powerful Iteration
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    # Simple list of items
+    packages:
+      - git
+      - curl
+      - vim
+      - htop
+      - tree
+
+    # List of users to create
+    users:
+      - name: alice
+        groups: developers
+        shell: /bin/bash
+      - name: bob
+        groups: admins
+        shell: /bin/bash
+      - name: charlie
+        groups: developers
+        shell: /bin/zsh
+
+    # Dictionary (key-value pairs)
+    app_ports:
+      web: 80
+      api: 8080
+      admin: 9000
+      metrics: 9090
+
+    # Nested structure
+    projects:
+      - name: garden-agent
+        path: /opt/garden-agent
+        files:
+          - main.py
+          - Dockerfile
+          - docker-compose.yml
+      - name: webapp
+        path: /opt/webapp
+        files:
+          - app.py
+          - requirements.txt
+
+    # Output directory
+    loop_dir: "/tmp/ansible-loops"
+
+  tasks:
+
+    # =========================================================================
+    # SETUP
+    # =========================================================================
+    - name: Create output directory
+      ansible.builtin.file:
+        path: "{{ loop_dir }}"
+        state: directory
+        mode: '0755'
+
+    # =========================================================================
+    # BASIC LOOP - Simple List
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 1: Loop over a simple list
+    # -------------------------------------------------------------------------
+    - name: Print each package name
+      ansible.builtin.debug:
+        msg: "Package: {{ item }}"
+      # 'loop' iterates over the list
+      # 'item' is the current element in each iteration
+      loop: "{{ packages }}"
+      # OUTPUT: Runs 5 times, once for each package
+
+    # -------------------------------------------------------------------------
+    # TASK 2: Loop with inline list
+    # -------------------------------------------------------------------------
+    - name: Print numbers 1 to 5
+      ansible.builtin.debug:
+        msg: "Number {{ item }}"
+      loop:
+        - 1
+        - 2
+        - 3
+        - 4
+        - 5
+      # You can define the list inline
+
+    # =========================================================================
+    # PRACTICAL EXAMPLES
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 3: Create multiple directories
+    # -------------------------------------------------------------------------
+    - name: Create project directories
+      ansible.builtin.file:
+        path: "{{ loop_dir }}/{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - project1
+        - project2
+        - project3
+        - backups
+        - logs
+
+    # -------------------------------------------------------------------------
+    # TASK 4: Create multiple files
+    # -------------------------------------------------------------------------
+    - name: Create placeholder files
+      ansible.builtin.copy:
+        content: "# Config for {{ item }}\n"
+        dest: "{{ loop_dir }}/{{ item }}.conf"
+        mode: '0644'
+      loop: "{{ packages }}"
+      # RESULT: Creates git.conf, curl.conf, vim.conf, etc.
+
+    # =========================================================================
+    # LOOP WITH DICTIONARIES
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 5: Loop over dictionary items
+    # -------------------------------------------------------------------------
+    - name: Show port assignments
+      ansible.builtin.debug:
+        msg: "Service {{ item.key }} runs on port {{ item.value }}"
+      # 'dict2items' converts dictionary to list of {key, value}
+      loop: "{{ app_ports | dict2items }}"
+      # OUTPUT: web -> 80, api -> 8080, etc.
+
+    # -------------------------------------------------------------------------
+    # TASK 6: Loop over list of dictionaries (common pattern!)
+    # -------------------------------------------------------------------------
+    - name: Show user details
+      ansible.builtin.debug:
+        msg: "User {{ item.name }} in group {{ item.groups }} with shell {{ item.shell }}"
+      loop: "{{ users }}"
+      # Each 'item' is a dictionary with name, groups, shell keys
+      # This is how you'd loop to create multiple users!
+
+    # =========================================================================
+    # LOOP CONTROL
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 7: Using loop_control for index
+    # -------------------------------------------------------------------------
+    - name: Show item with index
+      ansible.builtin.debug:
+        msg: "{{ my_idx }}: {{ my_item }}"
+      loop: "{{ packages }}"
+      loop_control:
+        # 'index_var' - variable name for the index (0-based)
+        index_var: my_idx
+        # 'loop_var' - rename 'item' to something else
+        loop_var: my_item
+      # USEFUL: When you need to know position in list
+
+    # -------------------------------------------------------------------------
+    # TASK 8: Using label for cleaner output
+    # -------------------------------------------------------------------------
+    - name: Create user configs (with clean output)
+      ansible.builtin.debug:
+        msg: "Creating config for {{ item.name }}"
+      loop: "{{ users }}"
+      loop_control:
+        # 'label' - what to show in task output (instead of whole dict)
+        label: "{{ item.name }}"
+      # BENEFIT: Output shows "alice" instead of entire user dictionary
+
+    # -------------------------------------------------------------------------
+    # TASK 9: Extended loop information
+    # -------------------------------------------------------------------------
+    - name: Show extended loop info
+      ansible.builtin.debug:
+        msg: |
+          Package: {{ item }}
+          Index: {{ ansible_loop.index }} of {{ ansible_loop.length }}
+          First: {{ ansible_loop.first }}
+          Last: {{ ansible_loop.last }}
+      loop: "{{ packages[:3] }}"  # Just first 3 for brevity
+      loop_control:
+        # 'extended' adds ansible_loop variable with extra info
+        extended: true
+
+    # =========================================================================
+    # CONDITIONAL LOOPS
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 10: Loop with when condition
+    # -------------------------------------------------------------------------
+    - name: Only process developers
+      ansible.builtin.debug:
+        msg: "Developer: {{ item.name }}"
+      loop: "{{ users }}"
+      # 'when' is evaluated for EACH item
+      when: item.groups == "developers"
+      # RESULT: Only alice and charlie (not bob who is admin)
+
+    # =========================================================================
+    # NESTED LOOPS
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 11: Loop over nested structure
+    # -------------------------------------------------------------------------
+    - name: Show project files
+      ansible.builtin.debug:
+        msg: "Project {{ item.0.name }}: file {{ item.1 }}"
+      # 'subelements' creates pairs of (parent, child)
+      loop: "{{ projects | subelements('files') }}"
+      # item.0 = the project dict
+      # item.1 = each file in project.files
+
+    # -------------------------------------------------------------------------
+    # TASK 12: Alternative - include_tasks for nested loops
+    # -------------------------------------------------------------------------
+    - name: Explain nested loop alternative
+      ansible.builtin.debug:
+        msg: |
+          For complex nested loops, you can use:
+
+          - name: Process each project
+            ansible.builtin.include_tasks: process_project.yml
+            loop: "{{ projects }}"
+
+          Then in process_project.yml:
+          - name: Process each file
+            ansible.builtin.debug:
+              msg: "{{ item }}"
+            loop: "{{ project.files }}"
+
+          This keeps playbooks cleaner!
+
+    # =========================================================================
+    # LEGACY SYNTAX (with_*)
+    # =========================================================================
+    # You'll see this in older playbooks - still works!
+
+    # -------------------------------------------------------------------------
+    # TASK 13: with_items (same as loop)
+    # -------------------------------------------------------------------------
+    - name: Legacy with_items example
+      ansible.builtin.debug:
+        msg: "Item: {{ item }}"
+      # 'with_items' is the old way, 'loop' is preferred now
+      with_items:
+        - apple
+        - banana
+        - cherry
+
+    # -------------------------------------------------------------------------
+    # TASK 14: with_dict (loop over dictionary)
+    # -------------------------------------------------------------------------
+    - name: Legacy with_dict example
+      ansible.builtin.debug:
+        msg: "{{ item.key }} = {{ item.value }}"
+      with_dict: "{{ app_ports }}"
+      # Same as: loop: "{{ app_ports | dict2items }}"
+
+    # -------------------------------------------------------------------------
+    # TASK 15: with_sequence (generate numbers)
+    # -------------------------------------------------------------------------
+    - name: Generate sequence of numbers
+      ansible.builtin.debug:
+        msg: "Number: {{ item }}"
+      with_sequence: start=1 end=5
+      # Or: with_sequence: count=5
+
+    # =========================================================================
+    # RANGE FUNCTION
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 16: Using range() for number sequences
+    # -------------------------------------------------------------------------
+    - name: Modern way to loop over numbers
+      ansible.builtin.debug:
+        msg: "Iteration {{ item }}"
+      loop: "{{ range(1, 6) | list }}"
+      # range(1, 6) = [1, 2, 3, 4, 5]
+
+    # =========================================================================
+    # PRACTICAL EXAMPLE: Your garden-agent setup
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 17: Simulating your installgitcurl.yml pattern
+    # -------------------------------------------------------------------------
+    - name: Show how your playbook uses loops
+      ansible.builtin.debug:
+        msg: |
+          In your installgitcurl.yml, you copy files like this:
+
+          - name: Copy agent files
+            ansible.builtin.copy:
+              src: "{{ item }}"
+              dest: /opt/garden-agent/
+            loop:
+              - main.py
+              - Dockerfile
+              - docker-compose.yml
+
+          This efficiently copies all 3 files in one task!
+
+    # =========================================================================
+    # SUMMARY
+    # =========================================================================
+    - name: List created files
+      ansible.builtin.find:
+        paths: "{{ loop_dir }}"
+        patterns: "*"
+        file_type: any
+      register: created_files
+
+    - name: Lesson Summary
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  LOOPS COMPLETE"
+          - "============================================"
+          - ""
+          - "FILES CREATED: {{ created_files.files | length }}"
+          - ""
+          - "KEY CONCEPTS LEARNED:"
+          - "  - loop: iterate over lists"
+          - "  - item: current element in loop"
+          - "  - dict2items: loop over dictionaries"
+          - "  - loop_control: index, label, extended"
+          - "  - subelements: nested list iteration"
+          - "  - with_items: legacy syntax (still works)"
+          - "  - range(): generate number sequences"
+          - ""
+          - "YOUR PROJECT CONNECTION:"
+          - "  Your installgitcurl.yml uses loop to copy"
+          - "  main.py, Dockerfile, docker-compose.yml!"
+          - ""
+          - "NEXT: Try 09_handlers.yml"

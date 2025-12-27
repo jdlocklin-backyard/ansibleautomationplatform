@@ -1,0 +1,258 @@
+---
+# =============================================================================
+# PLAYBOOK 03: User Management - Managing Users and Groups
+# =============================================================================
+# WHAT YOU'LL LEARN:
+#   - Creating users with the 'user' module
+#   - Creating groups with the 'group' module
+#   - Setting up SSH authorized keys
+#   - Understanding 'become' (privilege escalation)
+#   - Check mode for safe testing
+#
+# IMPORTANT: This playbook requires root privileges (sudo)
+#
+# RUN THIS PLAYBOOK:
+#   ansible-playbook educational/03_user_management.yml --check  (dry run)
+#   ansible-playbook educational/03_user_management.yml          (actual run)
+# =============================================================================
+
+- name: User and Group Management
+  hosts: localhost
+  connection: local
+
+  # -------------------------------------------------------------------------
+  # PRIVILEGE ESCALATION
+  # -------------------------------------------------------------------------
+  # 'become: true' - Run tasks as root (using sudo by default)
+  # Required for user/group management on most systems
+  become: true
+
+  # 'gather_facts: true' to get system information
+  gather_facts: true
+
+  vars:
+    # Define our application users
+    app_users:
+      - username: appuser1
+        comment: "Application User 1"
+        shell: /bin/bash
+      - username: appuser2
+        comment: "Application User 2"
+        shell: /bin/bash
+      - username: servicebot
+        comment: "Service Account - No Login"
+        shell: /usr/sbin/nologin
+
+    # Group for our application
+    app_group: "appteam"
+
+  tasks:
+
+    # =========================================================================
+    # CONCEPT: Check Mode
+    # =========================================================================
+    # Before we make changes, let's understand "check mode"
+    # Running with --check flag shows what WOULD happen without doing it
+    # This is like a "dry run" or "what if" mode
+    - name: Display check mode status
+      ansible.builtin.debug:
+        msg: >
+          {% if ansible_check_mode %}
+          RUNNING IN CHECK MODE - No changes will be made!
+          {% else %}
+          RUNNING IN NORMAL MODE - Changes will be applied!
+          {% endif %}
+      # TIP: Always run with --check first when managing users!
+
+    # =========================================================================
+    # TASK 1: Create a group
+    # =========================================================================
+    # The 'group' module manages groups on Linux systems
+    - name: Create the application group
+      ansible.builtin.group:
+        # 'name' - the group name to create
+        name: "{{ app_group }}"
+        # 'state: present' - ensure group exists (default)
+        state: present
+        # 'gid' - optionally specify the group ID number
+        # gid: 1500
+      # RESULT: Creates 'appteam' group if it doesn't exist
+
+    # =========================================================================
+    # TASK 2: Create a single user
+    # =========================================================================
+    # The 'user' module manages user accounts
+    - name: Create a basic user
+      ansible.builtin.user:
+        # 'name' - the username (required)
+        name: demouser
+        # 'comment' - full name/description (shows in /etc/passwd)
+        comment: "Demo User for Learning"
+        # 'shell' - login shell
+        shell: /bin/bash
+        # 'home' - home directory path (optional, uses default)
+        home: /home/demouser
+        # 'create_home: true' - create the home directory (default: true)
+        create_home: true
+        # 'state: present' - ensure user exists
+        state: present
+      # RESULT: Creates 'demouser' with home directory
+
+    # =========================================================================
+    # TASK 3: Create user with group membership
+    # =========================================================================
+    - name: Create a user in our application group
+      ansible.builtin.user:
+        name: appmanager
+        comment: "Application Manager"
+        shell: /bin/bash
+        # 'group' - primary group (must exist)
+        group: "{{ app_group }}"
+        # 'groups' - secondary/supplementary groups (comma-separated or list)
+        groups:
+          - sudo      # Add to sudo group for admin access
+          - users     # Common group
+        # 'append: true' - ADD to groups without removing existing membership
+        # Without append, the user's groups would be REPLACED
+        append: true
+        state: present
+
+    # =========================================================================
+    # TASK 4: Create multiple users with a loop
+    # =========================================================================
+    - name: Create application users from list
+      ansible.builtin.user:
+        name: "{{ item.username }}"
+        comment: "{{ item.comment }}"
+        shell: "{{ item.shell }}"
+        group: "{{ app_group }}"
+        create_home: true
+        state: present
+      # 'loop' iterates over our app_users list
+      loop: "{{ app_users }}"
+      # NOTE: Each 'item' is a dictionary with username, comment, shell keys
+
+    # =========================================================================
+    # TASK 5: Create user with password (hashed)
+    # =========================================================================
+    # IMPORTANT: Never put plain-text passwords in playbooks!
+    # Passwords must be hashed. Generate with:
+    #   python3 -c "import crypt; print(crypt.crypt('password'))"
+    # Or use ansible-vault to encrypt the hash
+    - name: Create user with a password (example)
+      ansible.builtin.user:
+        name: securemuser
+        comment: "User with Password"
+        shell: /bin/bash
+        # 'password' - the password HASH (not plain text!)
+        # This is just an example hash - don't use in production!
+        password: "{{ 'learning123' | password_hash('sha512', 'mysecretsalt') }}"
+        # 'update_password: on_create' - only set password when creating user
+        # 'always' would reset password every run
+        update_password: on_create
+        state: present
+      # WARNING: For real use, store password hashes in Ansible Vault!
+
+    # =========================================================================
+    # TASK 6: Add SSH authorized key
+    # =========================================================================
+    # The 'authorized_key' module manages SSH keys for user access
+    - name: Add SSH public key for demouser
+      ansible.builtin.authorized_key:
+        # 'user' - which user's authorized_keys file to modify
+        user: demouser
+        # 'key' - the public key content or URL
+        # This is a fake example key - replace with real key
+        key: "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ... example@localhost"
+        # 'state: present' - ensure key is in authorized_keys
+        state: present
+        # 'exclusive: true' - remove all other keys (be careful!)
+        # exclusive: true
+      # RESULT: User can now SSH using this key
+      # SKIP this in check mode since user might not exist
+      when: not ansible_check_mode
+
+    # =========================================================================
+    # TASK 7: Modify an existing user
+    # =========================================================================
+    - name: Update user's comment (like changing their full name)
+      ansible.builtin.user:
+        name: demouser
+        # 'comment' - update the user's comment/GECOS field
+        comment: "Demo User - Updated Description"
+        # Other attributes can be updated the same way
+      # Ansible only changes what's different (idempotent)
+
+    # =========================================================================
+    # TASK 8: Lock a user account
+    # =========================================================================
+    - name: Lock/disable the servicebot account
+      ansible.builtin.user:
+        name: servicebot
+        # 'password_lock: true' - locks the account (can't login)
+        password_lock: true
+      # Useful for service accounts or temporarily disabling users
+      when: not ansible_check_mode
+
+    # =========================================================================
+    # TASK 9: Show current users (for verification)
+    # =========================================================================
+    - name: Get list of users we created
+      ansible.builtin.command:
+        cmd: "grep -E 'demouser|appuser|appmanager|servicebot|securemuser' /etc/passwd"
+      register: created_users
+      changed_when: false
+      failed_when: false
+
+    - name: Display created users
+      ansible.builtin.debug:
+        msg: "{{ created_users.stdout_lines }}"
+      when: created_users.stdout_lines | length > 0
+
+    # =========================================================================
+    # CLEANUP SECTION (uncomment to remove users)
+    # =========================================================================
+    # WARNING: Only uncomment this to clean up after learning!
+    #
+    # - name: Remove demo users
+    #   ansible.builtin.user:
+    #     name: "{{ item }}"
+    #     state: absent      # Removes the user
+    #     remove: true       # Also removes home directory
+    #   loop:
+    #     - demouser
+    #     - appmanager
+    #     - appuser1
+    #     - appuser2
+    #     - servicebot
+    #     - securemuser
+    #
+    # - name: Remove the application group
+    #   ansible.builtin.group:
+    #     name: "{{ app_group }}"
+    #     state: absent
+
+    # =========================================================================
+    # SUMMARY
+    # =========================================================================
+    - name: Lesson Summary
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  USER MANAGEMENT COMPLETE"
+          - "============================================"
+          - ""
+          - "KEY CONCEPTS LEARNED:"
+          - "  - user module: name, shell, groups, password"
+          - "  - group module: creating/managing groups"
+          - "  - authorized_key module: SSH key management"
+          - "  - become: true for privilege escalation"
+          - "  - --check mode for safe testing"
+          - "  - password_hash filter for secure passwords"
+          - ""
+          - "SECURITY TIPS:"
+          - "  - Never store plain-text passwords"
+          - "  - Use Ansible Vault for secrets"
+          - "  - Always test with --check first"
+          - ""
+          - "NEXT: Try 04_package_installation.yml"

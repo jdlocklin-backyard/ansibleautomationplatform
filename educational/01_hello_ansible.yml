@@ -1,0 +1,147 @@
+---
+# =============================================================================
+# PLAYBOOK 01: Hello Ansible - Your First Playbook
+# =============================================================================
+# WHAT YOU'LL LEARN:
+#   - Basic playbook structure (YAML format)
+#   - The 'debug' module for printing messages
+#   - How to define and use variables
+#   - Understanding plays, tasks, and modules
+#
+# RUN THIS PLAYBOOK:
+#   ansible-playbook educational/01_hello_ansible.yml
+# =============================================================================
+
+# Every playbook starts with three dashes (---) to indicate a YAML file
+# A playbook is a list of "plays" - each play starts with a dash (-)
+
+- name: Hello Ansible - Learning the Basics
+  # -------------------------------------------------------------------------
+  # PLAY-LEVEL SETTINGS
+  # -------------------------------------------------------------------------
+  # 'hosts' - Which machines should this play run on?
+  # Common values: 'all', 'localhost', or a group name from your inventory
+  hosts: localhost
+
+  # 'connection: local' - Run on the control machine itself (no SSH needed)
+  # This is perfect for learning without needing remote servers
+  connection: local
+
+  # 'gather_facts: false' - Skip collecting system information
+  # We'll cover facts in a later lesson. Disabling speeds up execution.
+  gather_facts: false
+
+  # -------------------------------------------------------------------------
+  # VARIABLES SECTION
+  # -------------------------------------------------------------------------
+  # Variables make your playbooks reusable and dynamic
+  # They're defined under 'vars' and accessed with {{ variable_name }}
+  vars:
+    # Simple string variable
+    greeting: "Hello from Ansible!"
+
+    # Another string - your name
+    student_name: "Ansible Learner"
+
+    # A number (no quotes needed)
+    lesson_number: 1
+
+    # A list (array) of items
+    favorite_tools:
+      - Ansible
+      - Docker
+      - Git
+      - Python
+
+  # -------------------------------------------------------------------------
+  # TASKS SECTION
+  # -------------------------------------------------------------------------
+  # Tasks are the actions Ansible performs, executed in order from top to bottom
+  # Each task uses a "module" - a pre-built unit of work
+  tasks:
+
+    # =========================================================================
+    # TASK 1: Simple message with debug
+    # =========================================================================
+    # The 'debug' module prints messages to the console
+    # Great for troubleshooting and learning!
+    - name: Print a simple greeting
+      ansible.builtin.debug:
+        # 'msg' parameter - the message to display
+        msg: "{{ greeting }}"
+      # WHAT HAPPENS: Ansible prints "Hello from Ansible!" to the console
+
+    # =========================================================================
+    # TASK 2: Combining variables in a message
+    # =========================================================================
+    - name: Print a personalized welcome message
+      ansible.builtin.debug:
+        # You can mix text and variables using Jinja2 syntax {{ }}
+        msg: "Welcome, {{ student_name }}! This is lesson {{ lesson_number }}."
+      # WHAT HAPPENS: Variables are replaced with their values
+
+    # =========================================================================
+    # TASK 3: Printing a list variable
+    # =========================================================================
+    - name: Show our favorite tools
+      ansible.builtin.debug:
+        # 'var' parameter - prints the raw variable value
+        # Use 'var' instead of 'msg' when you want to see the data structure
+        var: favorite_tools
+      # WHAT HAPPENS: Displays the list as YAML/JSON format
+
+    # =========================================================================
+    # TASK 4: Using debug with verbosity
+    # =========================================================================
+    - name: This message only shows with -v flag
+      ansible.builtin.debug:
+        msg: "This is a verbose debug message for troubleshooting"
+        # 'verbosity' controls when this message appears
+        # 0 = always, 1 = with -v, 2 = with -vv, etc.
+        verbosity: 1
+      # RUN WITH: ansible-playbook 01_hello_ansible.yml -v
+
+    # =========================================================================
+    # TASK 5: Math with variables
+    # =========================================================================
+    - name: Do some math with variables
+      ansible.builtin.debug:
+        # Jinja2 supports math operations inside {{ }}
+        msg: "Lesson {{ lesson_number }} + 1 = Lesson {{ lesson_number + 1 }}"
+
+    # =========================================================================
+    # TASK 6: String manipulation
+    # =========================================================================
+    - name: Transform a string variable
+      ansible.builtin.debug:
+        # Jinja2 filters transform data using the pipe (|) symbol
+        msg: "SHOUTING: {{ greeting | upper }}"
+      # WHAT HAPPENS: Converts the greeting to uppercase
+
+    # =========================================================================
+    # TASK 7: Counting list items
+    # =========================================================================
+    - name: Count how many tools we have
+      ansible.builtin.debug:
+        # The 'length' filter counts items in a list
+        msg: "We have {{ favorite_tools | length }} favorite tools!"
+
+    # =========================================================================
+    # FINAL TASK: Course completion
+    # =========================================================================
+    - name: Congratulations message
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  Congratulations, {{ student_name }}!"
+          - "  You completed Lesson {{ lesson_number }}!"
+          - "============================================"
+          - ""
+          - "KEY CONCEPTS LEARNED:"
+          - "  - Playbook structure (plays, tasks)"
+          - "  - The debug module (msg, var)"
+          - "  - Variables and {{ }} syntax"
+          - "  - Jinja2 filters (|upper, |length)"
+          - ""
+          - "NEXT: Try 02_file_management.yml"
+      # WHAT HAPPENS: Multiple lines printed as a list

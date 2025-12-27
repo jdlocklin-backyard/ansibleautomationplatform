@@ -1,0 +1,199 @@
+---
+# =============================================================================
+# PLAYBOOK 02: File Management - Creating and Managing Files
+# =============================================================================
+# WHAT YOU'LL LEARN:
+#   - Creating directories with the 'file' module
+#   - Creating files with content using 'copy' module
+#   - Setting file permissions (mode)
+#   - Understanding 'state' parameter
+#   - Checking if files exist with 'stat' module
+#
+# REAL-WORLD USE: Setting up project directories like /opt/garden-agent
+#
+# RUN THIS PLAYBOOK:
+#   ansible-playbook educational/02_file_management.yml
+# =============================================================================
+
+- name: File Management Fundamentals
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    # Base directory for our learning exercises
+    # Using /tmp so we don't need root permissions
+    project_dir: "/tmp/ansible-learning"
+
+    # Sample content for files we'll create
+    readme_content: |
+      # My Ansible Project
+      This directory was created by Ansible!
+
+      ## What is this?
+      A learning exercise for file management.
+
+  tasks:
+
+    # =========================================================================
+    # TASK 1: Create a directory
+    # =========================================================================
+    # The 'file' module manages files, directories, and symlinks
+    - name: Create our project directory
+      ansible.builtin.file:
+        # 'path' - where to create the directory
+        path: "{{ project_dir }}"
+        # 'state: directory' - ensure this is a directory
+        # Other states: file, link, absent, touch
+        state: directory
+        # 'mode' - Unix permissions (like chmod)
+        # '0755' = rwxr-xr-x (owner: full, others: read+execute)
+        mode: '0755'
+      # RESULT: Creates /tmp/ansible-learning if it doesn't exist
+
+    # =========================================================================
+    # TASK 2: Create subdirectories
+    # =========================================================================
+    - name: Create subdirectories for our project
+      ansible.builtin.file:
+        path: "{{ project_dir }}/{{ item }}"
+        state: directory
+        mode: '0755'
+      # 'loop' iterates over a list - we'll cover this more in lesson 08
+      loop:
+        - src        # For source code
+        - config     # For configuration files
+        - logs       # For log files
+        - backups    # For backup files
+      # RESULT: Creates 4 subdirectories inside our project
+
+    # =========================================================================
+    # TASK 3: Create a file with content using 'copy'
+    # =========================================================================
+    # The 'copy' module can copy files OR create files with inline content
+    - name: Create a README file with content
+      ansible.builtin.copy:
+        # 'content' - the text to put in the file
+        # Use this instead of 'src' when you want inline content
+        content: "{{ readme_content }}"
+        # 'dest' - where to create the file
+        dest: "{{ project_dir }}/README.md"
+        # 'mode' for files: '0644' = rw-r--r-- (owner: read+write, others: read)
+        mode: '0644'
+      # NOTE: 'copy' is idempotent - running again won't change anything
+      #       if the content is already correct
+
+    # =========================================================================
+    # TASK 4: Create an empty file with 'touch'
+    # =========================================================================
+    - name: Create an empty log file
+      ansible.builtin.file:
+        path: "{{ project_dir }}/logs/app.log"
+        # 'state: touch' - creates empty file (like Unix touch command)
+        state: touch
+        mode: '0644'
+      # NOTE: 'touch' updates the timestamp if file exists
+
+    # =========================================================================
+    # TASK 5: Create a configuration file
+    # =========================================================================
+    - name: Create a sample configuration file
+      ansible.builtin.copy:
+        content: |
+          # Application Configuration
+          # Created by Ansible
+
+          [general]
+          app_name = MyApp
+          debug = false
+          log_level = INFO
+
+          [database]
+          host = localhost
+          port = 5432
+
+          [api]
+          # Like your garden-agent OpenAI key!
+          api_key = YOUR_KEY_HERE
+        dest: "{{ project_dir }}/config/app.conf"
+        mode: '0640'
+        # '0640' = rw-r----- (more restrictive for config files with secrets)
+
+    # =========================================================================
+    # TASK 6: Check if a file exists using 'stat'
+    # =========================================================================
+    # The 'stat' module gathers info about files/directories
+    - name: Check if our README exists
+      ansible.builtin.stat:
+        path: "{{ project_dir }}/README.md"
+      # 'register' saves the result into a variable for later use
+      register: readme_check
+
+    - name: Report on README file
+      ansible.builtin.debug:
+        msg:
+          - "README.md exists: {{ readme_check.stat.exists }}"
+          - "File size: {{ readme_check.stat.size }} bytes"
+          - "Is a file: {{ readme_check.stat.isreg }}"
+          - "Permissions: {{ readme_check.stat.mode }}"
+      # WHAT HAPPENS: Shows detailed info about the file
+
+    # =========================================================================
+    # TASK 7: Create a symbolic link
+    # =========================================================================
+    - name: Create a symlink to our config
+      ansible.builtin.file:
+        # 'src' - what the link points TO
+        src: "{{ project_dir }}/config/app.conf"
+        # 'dest' (or 'path') - where to create the link
+        dest: "{{ project_dir }}/current-config"
+        # 'state: link' - creates a symbolic link
+        state: link
+      # RESULT: current-config -> config/app.conf
+
+    # =========================================================================
+    # TASK 8: Set ownership (commented out - needs root)
+    # =========================================================================
+    # Uncomment and run with 'become: true' if you have sudo access
+    # - name: Set file ownership
+    #   ansible.builtin.file:
+    #     path: "{{ project_dir }}"
+    #     owner: www-data       # The user who owns the file
+    #     group: www-data       # The group that owns the file
+    #     recurse: true         # Apply to all files/subdirs
+    #   become: true            # Needs root to change ownership
+
+    # =========================================================================
+    # TASK 9: Delete a file (state: absent)
+    # =========================================================================
+    - name: Clean up - remove a file
+      ansible.builtin.file:
+        path: "{{ project_dir }}/logs/app.log"
+        # 'state: absent' - ensures the file/directory does NOT exist
+        state: absent
+      # RESULT: Removes the log file we created earlier
+
+    # =========================================================================
+    # SUMMARY: Show what we created
+    # =========================================================================
+    - name: List the directory structure we created
+      ansible.builtin.command:
+        cmd: find {{ project_dir }} -type f -o -type l -o -type d
+      register: dir_listing
+      changed_when: false
+
+    - name: Display our project structure
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  FILES AND DIRECTORIES CREATED"
+          - "============================================"
+          - "{{ dir_listing.stdout_lines }}"
+          - ""
+          - "KEY CONCEPTS LEARNED:"
+          - "  - file module: state (directory/touch/link/absent)"
+          - "  - copy module: content parameter for inline files"
+          - "  - stat module: check if files exist"
+          - "  - mode: Unix permissions (0755, 0644, 0640)"
+          - ""
+          - "NEXT: Try 03_user_management.yml"

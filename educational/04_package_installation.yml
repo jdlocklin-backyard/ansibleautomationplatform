@@ -1,0 +1,236 @@
+---
+# =============================================================================
+# PLAYBOOK 04: Package Installation - Installing Software
+# =============================================================================
+# WHAT YOU'LL LEARN:
+#   - Installing packages with 'apt' module (Debian/Ubuntu)
+#   - The generic 'package' module (cross-platform)
+#   - Installing multiple packages efficiently
+#   - Understanding 'state' options (present, latest, absent)
+#   - Updating the package cache
+#
+# REAL-WORLD USE: Like your installgitcurl.yml - installing git and curl!
+#
+# RUN THIS PLAYBOOK:
+#   ansible-playbook educational/04_package_installation.yml --check
+#   ansible-playbook educational/04_package_installation.yml
+# =============================================================================
+
+- name: Package Installation Fundamentals
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    # List of packages we want to install
+    # These are useful tools you'll use in your projects
+    essential_packages:
+      - git          # Version control - you use this!
+      - curl         # HTTP client - you use this too!
+      - wget         # Alternative HTTP client
+      - vim          # Text editor
+      - htop         # Interactive process viewer
+
+    # Development tools (related to your garden-agent project)
+    dev_packages:
+      - python3-pip  # Python package manager
+      - python3-venv # Python virtual environments
+
+  tasks:
+
+    # =========================================================================
+    # UNDERSTANDING PACKAGE MANAGERS
+    # =========================================================================
+    # Ansible has different modules for different package managers:
+    #   - apt: Debian/Ubuntu (.deb packages)
+    #   - yum/dnf: RHEL/CentOS/Fedora (.rpm packages)
+    #   - package: Generic (auto-detects the right one)
+    #   - pip: Python packages
+    #   - npm: Node.js packages
+
+    # =========================================================================
+    # TASK 1: Update the package cache
+    # =========================================================================
+    # Before installing, refresh the package list
+    # This is like running 'apt update' on Debian/Ubuntu
+    - name: Update apt package cache
+      ansible.builtin.apt:
+        # 'update_cache: true' - refresh package list from repositories
+        update_cache: true
+        # 'cache_valid_time' - don't update if cache is newer than X seconds
+        # 3600 = 1 hour - prevents unnecessary updates
+        cache_valid_time: 3600
+      # Only run on Debian-based systems
+      when: ansible_os_family == "Debian"
+
+    # =========================================================================
+    # TASK 2: Install a single package
+    # =========================================================================
+    - name: Install git (single package example)
+      ansible.builtin.apt:
+        # 'name' - the package name
+        name: git
+        # 'state' options:
+        #   present - install if missing (idempotent)
+        #   latest  - install OR upgrade to newest version
+        #   absent  - remove the package
+        state: present
+      when: ansible_os_family == "Debian"
+      # RESULT: Git is installed, or left alone if already present
+
+    # =========================================================================
+    # TASK 3: Install with 'latest' state
+    # =========================================================================
+    - name: Ensure curl is at the latest version
+      ansible.builtin.apt:
+        name: curl
+        # 'state: latest' - will upgrade if a newer version is available
+        state: latest
+      when: ansible_os_family == "Debian"
+      # WHEN TO USE: Security-critical packages that should always be current
+
+    # =========================================================================
+    # TASK 4: Install multiple packages at once
+    # =========================================================================
+    # More efficient than installing one at a time!
+    - name: Install essential packages (batch install)
+      ansible.builtin.apt:
+        # 'name' can be a list!
+        name: "{{ essential_packages }}"
+        state: present
+      when: ansible_os_family == "Debian"
+      # EFFICIENCY: One apt transaction instead of five
+
+    # =========================================================================
+    # TASK 5: Install development packages
+    # =========================================================================
+    - name: Install Python development tools
+      ansible.builtin.apt:
+        name: "{{ dev_packages }}"
+        state: present
+      when: ansible_os_family == "Debian"
+      # RELATED TO: Your garden-agent project uses Python!
+
+    # =========================================================================
+    # TASK 6: Using the generic 'package' module
+    # =========================================================================
+    # The 'package' module works across different OS families
+    # It auto-detects whether to use apt, yum, dnf, etc.
+    - name: Install tree (cross-platform way)
+      ansible.builtin.package:
+        name: tree
+        state: present
+      # BENEFIT: This playbook would work on Ubuntu AND CentOS
+      # DRAWBACK: Some package names differ between distros
+
+    # =========================================================================
+    # TASK 7: Install a .deb file directly
+    # =========================================================================
+    # Sometimes you need to install from a .deb file (not from repos)
+    # Example: Installing a downloaded package
+    - name: Example - Install from .deb URL (commented)
+      ansible.builtin.apt:
+        # 'deb' - path or URL to a .deb file
+        deb: https://example.com/package.deb
+      when: false  # Disabled - just an example
+      # USE CASE: Installing software not in official repositories
+
+    # =========================================================================
+    # TASK 8: Check if packages are installed
+    # =========================================================================
+    - name: Gather package facts
+      ansible.builtin.package_facts:
+        manager: auto
+      # This populates ansible_facts.packages with installed packages
+
+    - name: Report on installed packages
+      ansible.builtin.debug:
+        msg: >
+          {{ item }} is
+          {% if item in ansible_facts.packages %}
+          INSTALLED (v{{ ansible_facts.packages[item][0].version }})
+          {% else %}
+          NOT INSTALLED
+          {% endif %}
+      loop: "{{ essential_packages }}"
+
+    # =========================================================================
+    # TASK 9: Install Python packages with pip
+    # =========================================================================
+    # For your garden-agent project, you might need Python packages
+    - name: Ensure pip packages are installed
+      ansible.builtin.pip:
+        name:
+          - requests      # HTTP library
+          - pyyaml        # YAML parsing
+        # 'state' works same as apt: present, latest, absent
+        state: present
+        # 'executable' - specify which pip to use
+        executable: pip3
+      # NOTE: For production, consider using virtualenvs (shown in task 10)
+
+    # =========================================================================
+    # TASK 10: Install pip packages in a virtualenv
+    # =========================================================================
+    - name: Install packages in a virtual environment
+      ansible.builtin.pip:
+        name:
+          - flask         # Web framework
+          - openai        # OpenAI API - like your garden-agent!
+        # 'virtualenv' - create/use this virtualenv
+        virtualenv: /opt/myapp-venv
+        virtualenv_python: python3
+        state: present
+      # RESULT: Creates /opt/myapp-venv with packages installed
+      # Your garden-agent could use this pattern!
+
+    # =========================================================================
+    # TASK 11: Remove a package
+    # =========================================================================
+    - name: Remove a package (example with tree)
+      ansible.builtin.apt:
+        name: tree
+        # 'state: absent' - ensures package is NOT installed
+        state: absent
+        # 'purge: true' - also remove config files (apt purge)
+        purge: false
+      when: ansible_os_family == "Debian"
+      # BE CAREFUL: Don't accidentally remove important packages!
+
+    # =========================================================================
+    # TASK 12: Clean up apt cache
+    # =========================================================================
+    - name: Remove unnecessary packages and clean cache
+      ansible.builtin.apt:
+        # 'autoclean: true' - clear old package files from cache
+        autoclean: true
+        # 'autoremove: true' - remove dependencies no longer needed
+        autoremove: true
+      when: ansible_os_family == "Debian"
+      # BENEFIT: Frees up disk space on servers
+
+    # =========================================================================
+    # SUMMARY
+    # =========================================================================
+    - name: Lesson Summary
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  PACKAGE INSTALLATION COMPLETE"
+          - "============================================"
+          - ""
+          - "KEY CONCEPTS LEARNED:"
+          - "  - apt module: Debian/Ubuntu packages"
+          - "  - package module: cross-platform"
+          - "  - pip module: Python packages"
+          - "  - state options: present, latest, absent"
+          - "  - update_cache: refresh package lists"
+          - "  - Installing from lists (batch install)"
+          - "  - package_facts: check what's installed"
+          - ""
+          - "YOUR PROJECT CONNECTION:"
+          - "  This is exactly like your installgitcurl.yml!"
+          - "  Now you understand all the options available."
+          - ""
+          - "NEXT: Try 05_service_control.yml"

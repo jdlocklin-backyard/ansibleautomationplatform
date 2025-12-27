@@ -1,0 +1,376 @@
+---
+# =============================================================================
+# PLAYBOOK 14: Facts and Magic Variables - System Information
+# =============================================================================
+# WHAT YOU'LL LEARN:
+#   - What Ansible facts are and how to use them
+#   - Gathering system information automatically
+#   - Custom facts
+#   - Magic variables (inventory_hostname, groups, etc.)
+#   - The setup module
+#
+# REAL-WORLD USE: Conditional tasks based on OS, memory, architecture!
+#
+# RUN THIS PLAYBOOK:
+#   ansible-playbook educational/14_facts_magic_variables.yml
+# =============================================================================
+
+- name: Facts and Magic Variables - Know Your Systems
+  hosts: localhost
+  connection: local
+  # Facts are gathered by default (gather_facts: true)
+  gather_facts: true
+
+  vars:
+    # Custom variable for comparison
+    min_memory_mb: 1024
+    min_disk_gb: 10
+
+  tasks:
+
+    # =========================================================================
+    # UNDERSTANDING FACTS
+    # =========================================================================
+    - name: Explain Ansible facts
+      ansible.builtin.debug:
+        msg: |
+          WHAT ARE FACTS?
+          ===============
+
+          Facts are system information gathered automatically by Ansible.
+          They run when you start a playbook (unless gather_facts: false).
+
+          Facts include:
+          - Operating system details
+          - Network interfaces and IPs
+          - Hardware (CPU, memory, disk)
+          - Date/time
+          - Environment variables
+          - And much more!
+
+          Facts are stored in: ansible_facts dictionary
+          Or accessed directly: ansible_distribution, ansible_hostname, etc.
+
+    # =========================================================================
+    # BASIC SYSTEM FACTS
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 1: Operating System Information
+    # -------------------------------------------------------------------------
+    - name: Show OS information
+      ansible.builtin.debug:
+        msg:
+          - "============ OS INFORMATION ============"
+          - "Distribution: {{ ansible_distribution }}"
+          - "Version: {{ ansible_distribution_version }}"
+          - "Major Version: {{ ansible_distribution_major_version }}"
+          - "OS Family: {{ ansible_os_family }}"
+          - "Kernel: {{ ansible_kernel }}"
+          - "Architecture: {{ ansible_architecture }}"
+      # These are the facts you use in your multiOSupdate.yml!
+
+    # -------------------------------------------------------------------------
+    # TASK 2: Hardware Information
+    # -------------------------------------------------------------------------
+    - name: Show hardware information
+      ansible.builtin.debug:
+        msg:
+          - "============ HARDWARE INFO ============"
+          - "Hostname: {{ ansible_hostname }}"
+          - "FQDN: {{ ansible_fqdn }}"
+          - "Processor: {{ ansible_processor[2] | default('Unknown') }}"
+          - "CPU Cores: {{ ansible_processor_vcpus }}"
+          - "Total Memory: {{ ansible_memtotal_mb }} MB"
+          - "Free Memory: {{ ansible_memfree_mb }} MB"
+
+    # -------------------------------------------------------------------------
+    # TASK 3: Network Information
+    # -------------------------------------------------------------------------
+    - name: Show network information
+      ansible.builtin.debug:
+        msg:
+          - "============ NETWORK INFO ============"
+          - "Default IPv4: {{ ansible_default_ipv4.address | default('N/A') }}"
+          - "Default Interface: {{ ansible_default_ipv4.interface | default('N/A') }}"
+          - "All Interfaces: {{ ansible_interfaces }}"
+
+    # -------------------------------------------------------------------------
+    # TASK 4: Date and Time Facts
+    # -------------------------------------------------------------------------
+    - name: Show date/time information
+      ansible.builtin.debug:
+        msg:
+          - "============ DATE/TIME INFO ============"
+          - "Date: {{ ansible_date_time.date }}"
+          - "Time: {{ ansible_date_time.time }}"
+          - "Timezone: {{ ansible_date_time.tz }}"
+          - "ISO Format: {{ ansible_date_time.iso8601 }}"
+          - "Epoch: {{ ansible_date_time.epoch }}"
+
+    # =========================================================================
+    # USING FACTS IN CONDITIONS
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 5: OS-specific tasks (like your multiOSupdate.yml!)
+    # -------------------------------------------------------------------------
+    - name: Ubuntu-specific message
+      ansible.builtin.debug:
+        msg: "This is Ubuntu! We would use APT for package management."
+      when: ansible_distribution == "Ubuntu"
+
+    - name: Debian family message
+      ansible.builtin.debug:
+        msg: "This is a Debian-based system (Ubuntu, Debian, etc.)"
+      when: ansible_os_family == "Debian"
+
+    - name: RedHat family message
+      ansible.builtin.debug:
+        msg: "This is a RedHat-based system (RHEL, CentOS, Fedora)"
+      when: ansible_os_family == "RedHat"
+
+    - name: 64-bit system check
+      ansible.builtin.debug:
+        msg: "This is a 64-bit system"
+      when: ansible_architecture == "x86_64"
+
+    # -------------------------------------------------------------------------
+    # TASK 6: Memory-based decisions
+    # -------------------------------------------------------------------------
+    - name: Check if system has enough memory
+      ansible.builtin.debug:
+        msg: "System has {{ ansible_memtotal_mb }}MB RAM - sufficient!"
+      when: ansible_memtotal_mb >= min_memory_mb
+
+    - name: Warn about low memory
+      ansible.builtin.debug:
+        msg: "WARNING: System only has {{ ansible_memtotal_mb }}MB RAM!"
+      when: ansible_memtotal_mb < min_memory_mb
+
+    # =========================================================================
+    # EXPLORING FACTS
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 7: Show all facts (be careful - lots of output!)
+    # -------------------------------------------------------------------------
+    - name: Display specific fact categories
+      ansible.builtin.debug:
+        msg: |
+          To see ALL facts, run:
+          ansible localhost -m setup
+
+          To filter facts:
+          ansible localhost -m setup -a 'filter=ansible_distribution*'
+          ansible localhost -m setup -a 'filter=ansible_mem*'
+          ansible localhost -m setup -a 'filter=ansible_*ipv4*'
+
+    # -------------------------------------------------------------------------
+    # TASK 8: Access nested facts
+    # -------------------------------------------------------------------------
+    - name: Show how to access nested facts
+      ansible.builtin.debug:
+        msg:
+          - "============ NESTED FACT ACCESS ============"
+          - "Method 1: ansible_default_ipv4.address = {{ ansible_default_ipv4.address | default('N/A') }}"
+          - "Method 2: ansible_default_ipv4['address'] = {{ ansible_default_ipv4['address'] | default('N/A') }}"
+          - "Method 3: ansible_facts['default_ipv4']['address'] = {{ ansible_facts['default_ipv4']['address'] | default('N/A') }}"
+
+    # =========================================================================
+    # MAGIC VARIABLES
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 9: Inventory-related magic variables
+    # -------------------------------------------------------------------------
+    - name: Show inventory magic variables
+      ansible.builtin.debug:
+        msg:
+          - "============ MAGIC VARIABLES ============"
+          - "inventory_hostname: {{ inventory_hostname }}"
+          - "inventory_hostname_short: {{ inventory_hostname_short }}"
+          - "ansible_host: {{ ansible_host | default('not set') }}"
+          - "group_names: {{ group_names }}"
+          - "groups: {{ groups.keys() | list }}"
+
+    # -------------------------------------------------------------------------
+    # TASK 10: Play and playbook variables
+    # -------------------------------------------------------------------------
+    - name: Show playbook magic variables
+      ansible.builtin.debug:
+        msg:
+          - "============ PLAYBOOK VARIABLES ============"
+          - "playbook_dir: {{ playbook_dir }}"
+          - "role_path: {{ role_path | default('not in a role') }}"
+          - "ansible_version: {{ ansible_version.full }}"
+
+    # -------------------------------------------------------------------------
+    # TASK 11: Environment variables
+    # -------------------------------------------------------------------------
+    - name: Show environment facts
+      ansible.builtin.debug:
+        msg:
+          - "============ ENVIRONMENT ============"
+          - "ansible_env.HOME: {{ ansible_env.HOME }}"
+          - "ansible_env.USER: {{ ansible_env.USER }}"
+          - "ansible_env.PATH: {{ ansible_env.PATH | truncate(50) }}..."
+
+    # =========================================================================
+    # CUSTOM FACTS
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 12: Using set_fact for custom facts
+    # -------------------------------------------------------------------------
+    - name: Create custom facts with set_fact
+      ansible.builtin.set_fact:
+        # Custom facts calculated from existing facts
+        memory_gb: "{{ (ansible_memtotal_mb / 1024) | round(1) }}"
+        is_production: "{{ 'prod' in inventory_hostname }}"
+        app_tier: "{{ 'web' if 'web' in inventory_hostname else 'app' }}"
+
+    - name: Display custom facts
+      ansible.builtin.debug:
+        msg:
+          - "Memory in GB: {{ memory_gb }}"
+          - "Is Production: {{ is_production }}"
+          - "Application Tier: {{ app_tier }}"
+
+    # -------------------------------------------------------------------------
+    # TASK 13: Local facts (facts.d)
+    # -------------------------------------------------------------------------
+    - name: Explain local facts
+      ansible.builtin.debug:
+        msg: |
+          LOCAL FACTS (/etc/ansible/facts.d):
+          ====================================
+
+          You can create custom facts on managed hosts!
+
+          1. Create directory: /etc/ansible/facts.d/
+          2. Add files ending in .fact (INI or JSON format)
+
+          Example /etc/ansible/facts.d/app.fact:
+          [app]
+          name=garden-agent
+          version=1.0.0
+          port=8080
+
+          These become available as:
+          ansible_local.app.name = "garden-agent"
+          ansible_local.app.version = "1.0.0"
+          ansible_local.app.port = "8080"
+
+    # =========================================================================
+    # THE SETUP MODULE
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 14: Using setup module explicitly
+    # -------------------------------------------------------------------------
+    - name: Re-gather facts with setup module
+      ansible.builtin.setup:
+        # 'gather_subset' limits what facts to collect (faster!)
+        gather_subset:
+          - hardware
+          - network
+        # gather_timeout: 10  # Optional timeout
+      # Use when you need fresh facts mid-playbook
+
+    - name: Show that facts are refreshed
+      ansible.builtin.debug:
+        msg: "Facts re-gathered. Memory: {{ ansible_memtotal_mb }}MB"
+
+    # -------------------------------------------------------------------------
+    # TASK 15: Gather only specific facts
+    # -------------------------------------------------------------------------
+    - name: Explain gather_subset options
+      ansible.builtin.debug:
+        msg: |
+          GATHER_SUBSET OPTIONS:
+          ======================
+
+          all      - Gather everything (default)
+          min      - Minimal facts (fastest)
+          hardware - CPU, memory, disk
+          network  - Network interfaces
+          virtual  - Virtualization info
+          ohai     - Ohai facts (Chef-compatible)
+          facter   - Facter facts (Puppet-compatible)
+
+          Example for faster playbooks:
+          - hosts: all
+            gather_facts: true
+            gather_subset:
+              - min
+              - network
+
+    # =========================================================================
+    # PRACTICAL: SYSTEM INVENTORY REPORT
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 16: Generate system report
+    # -------------------------------------------------------------------------
+    - name: Generate system inventory report
+      ansible.builtin.copy:
+        content: |
+          # System Inventory Report
+          Generated: {{ ansible_date_time.iso8601 }}
+
+          ## System Information
+          - Hostname: {{ ansible_hostname }}
+          - FQDN: {{ ansible_fqdn }}
+          - OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+          - Kernel: {{ ansible_kernel }}
+          - Architecture: {{ ansible_architecture }}
+
+          ## Hardware
+          - CPU Cores: {{ ansible_processor_vcpus }}
+          - Total RAM: {{ ansible_memtotal_mb }} MB ({{ memory_gb }} GB)
+          - Free RAM: {{ ansible_memfree_mb }} MB
+
+          ## Network
+          - Primary IP: {{ ansible_default_ipv4.address | default('N/A') }}
+          - Interfaces: {{ ansible_interfaces | join(', ') }}
+
+          ## Ansible
+          - Version: {{ ansible_version.full }}
+          - Python: {{ ansible_python.version.major }}.{{ ansible_python.version.minor }}
+        dest: /tmp/system_report.md
+        mode: '0644'
+
+    - name: Display report location
+      ansible.builtin.debug:
+        msg: "System report created at /tmp/system_report.md"
+
+    # =========================================================================
+    # SUMMARY
+    # =========================================================================
+    - name: Lesson Summary
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  FACTS & MAGIC VARIABLES COMPLETE"
+          - "============================================"
+          - ""
+          - "KEY FACTS LEARNED:"
+          - "  - ansible_distribution: OS name"
+          - "  - ansible_os_family: Debian/RedHat/Windows"
+          - "  - ansible_memtotal_mb: Total RAM"
+          - "  - ansible_default_ipv4: Network info"
+          - "  - ansible_date_time: Date/time info"
+          - ""
+          - "MAGIC VARIABLES:"
+          - "  - inventory_hostname: Current host name"
+          - "  - group_names: Groups this host is in"
+          - "  - hostvars: Access other hosts' vars"
+          - "  - playbook_dir: Playbook location"
+          - ""
+          - "YOUR PROJECT CONNECTION:"
+          - "  Your multiOSupdate.yml uses"
+          - "  ansible_os_family to run different"
+          - "  update commands per OS!"
+          - ""
+          - "NEXT: Try 15_vault_secrets.yml"

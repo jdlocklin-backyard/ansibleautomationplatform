@@ -1,0 +1,421 @@
+---
+# =============================================================================
+# PLAYBOOK 13: Error Handling - Graceful Failure Management
+# =============================================================================
+# WHAT YOU'LL LEARN:
+#   - Block/rescue/always for try-catch-finally behavior
+#   - ignore_errors to continue on failure
+#   - failed_when for custom failure conditions
+#   - Assertions for validation
+#   - Handling command failures gracefully
+#
+# RUN THIS PLAYBOOK:
+#   ansible-playbook educational/13_error_handling.yml
+# =============================================================================
+
+- name: Error Handling - Dealing with Failures
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    demo_dir: "/tmp/ansible-error-demo"
+    app_name: "garden-agent"
+
+  tasks:
+
+    # =========================================================================
+    # SETUP
+    # =========================================================================
+    - name: Create demo directory
+      ansible.builtin.file:
+        path: "{{ demo_dir }}"
+        state: directory
+        mode: '0755'
+
+    # =========================================================================
+    # UNDERSTANDING ERROR HANDLING
+    # =========================================================================
+    - name: Explain error handling concepts
+      ansible.builtin.debug:
+        msg: |
+          ERROR HANDLING IN ANSIBLE:
+          ==========================
+
+          By default, Ansible STOPS when a task fails.
+          This isn't always what you want!
+
+          Options:
+          1. ignore_errors: continue even if task fails
+          2. failed_when: define what "failure" means
+          3. block/rescue/always: try-catch-finally pattern
+          4. assert: validate conditions
+          5. any_errors_fatal: stop all hosts on any failure
+
+    # =========================================================================
+    # IGNORE ERRORS
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 1: Basic ignore_errors
+    # -------------------------------------------------------------------------
+    - name: Try to find a file that doesn't exist
+      ansible.builtin.command:
+        cmd: cat /nonexistent/file.txt
+      # 'ignore_errors: true' - continue even if task fails
+      ignore_errors: true
+      register: file_result
+      # WITHOUT ignore_errors: playbook would stop here
+      # WITH ignore_errors: playbook continues
+
+    - name: Report on previous task
+      ansible.builtin.debug:
+        msg: |
+          Previous task failed: {{ file_result.failed }}
+          Return code: {{ file_result.rc }}
+          Error message: {{ file_result.stderr | default('none') }}
+      # We can check if it failed and handle appropriately
+
+    # -------------------------------------------------------------------------
+    # TASK 2: Using failed_when for custom failure conditions
+    # -------------------------------------------------------------------------
+    - name: Run a command with custom failure condition
+      ansible.builtin.command:
+        cmd: echo "WARNING: Low disk space"
+      register: disk_check
+      # 'failed_when' defines what constitutes failure
+      # This task fails if output contains "ERROR", not "WARNING"
+      failed_when: "'ERROR' in disk_check.stdout"
+      # RESULT: Task succeeds because output contains WARNING, not ERROR
+
+    - name: Show disk check result
+      ansible.builtin.debug:
+        msg: "Disk check output: {{ disk_check.stdout }}"
+
+    # -------------------------------------------------------------------------
+    # TASK 3: Never fail (failed_when: false)
+    # -------------------------------------------------------------------------
+    - name: Command that never fails
+      ansible.builtin.command:
+        cmd: exit 1
+      # 'failed_when: false' - task never fails
+      failed_when: false
+      register: never_fail
+      # Use carefully! Might hide real problems.
+
+    - name: Show that it didn't fail
+      ansible.builtin.debug:
+        msg: "Return code was {{ never_fail.rc }} but task didn't fail"
+
+    # =========================================================================
+    # BLOCK / RESCUE / ALWAYS
+    # =========================================================================
+    # This is like try/catch/finally in programming!
+
+    # -------------------------------------------------------------------------
+    # TASK 4: Basic block/rescue pattern
+    # -------------------------------------------------------------------------
+    - name: Demonstrate block/rescue (try/catch)
+      block:
+        # BLOCK: Tasks to try (like "try" in Python)
+        - name: Try to do something risky
+          ansible.builtin.command:
+            cmd: cat /nonexistent/file.txt
+          # This will fail!
+
+        - name: This won't run (previous task failed)
+          ansible.builtin.debug:
+            msg: "This message won't appear"
+
+      rescue:
+        # RESCUE: Runs if any task in block fails (like "except" in Python)
+        - name: Handle the error
+          ansible.builtin.debug:
+            msg: "Caught an error! Handling gracefully..."
+
+        - name: Create the missing file
+          ansible.builtin.copy:
+            content: "Created by rescue block\n"
+            dest: "{{ demo_dir }}/rescued_file.txt"
+            mode: '0644'
+
+        - name: Log the recovery
+          ansible.builtin.debug:
+            msg: "Recovery complete - file created"
+
+    # -------------------------------------------------------------------------
+    # TASK 5: Block/rescue/always pattern
+    # -------------------------------------------------------------------------
+    - name: Full try/catch/finally pattern
+      block:
+        - name: Attempt application deployment
+          ansible.builtin.debug:
+            msg: "Starting deployment of {{ app_name }}..."
+
+        - name: Simulate deployment failure
+          ansible.builtin.command:
+            cmd: exit 1
+          # Force failure for demo
+
+      rescue:
+        - name: Deployment failed - rollback
+          ansible.builtin.debug:
+            msg: "Deployment failed! Initiating rollback..."
+
+        - name: Restore previous version
+          ansible.builtin.debug:
+            msg: "Restored previous version of {{ app_name }}"
+
+        - name: Send failure notification
+          ansible.builtin.debug:
+            msg: "Alert sent to admin@example.com"
+
+      always:
+        # ALWAYS: Runs whether block succeeded OR failed (like "finally")
+        - name: Cleanup temporary files
+          ansible.builtin.debug:
+            msg: "Cleaning up temp files..."
+
+        - name: Release deployment lock
+          ansible.builtin.debug:
+            msg: "Deployment lock released"
+
+        - name: Log deployment attempt
+          ansible.builtin.copy:
+            content: |
+              Deployment attempt at {{ ansible_date_time.iso8601 | default('unknown') }}
+              Application: {{ app_name }}
+              Status: Attempted (check rescue block for failure)
+            dest: "{{ demo_dir }}/deployment.log"
+            mode: '0644'
+
+    # =========================================================================
+    # ASSERTIONS
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 6: Using assert for validation
+    # -------------------------------------------------------------------------
+    - name: Define variables to validate
+      ansible.builtin.set_fact:
+        app_port: 8080
+        max_port: 65535
+        min_port: 1024
+        environment: "production"
+        disk_space_gb: 15
+
+    - name: Validate configuration with assert
+      ansible.builtin.assert:
+        that:
+          # List of conditions that must ALL be true
+          - app_port >= min_port
+          - app_port <= max_port
+          - environment in ['development', 'staging', 'production']
+          - disk_space_gb >= 10
+        # Custom failure message
+        fail_msg: "Configuration validation failed!"
+        # Custom success message
+        success_msg: "All configuration checks passed!"
+      # RESULT: Playbook continues if all assertions pass
+
+    # -------------------------------------------------------------------------
+    # TASK 7: Pre-flight checks with assert
+    # -------------------------------------------------------------------------
+    - name: Pre-flight checks before deployment
+      ansible.builtin.assert:
+        that:
+          - demo_dir is defined
+          - app_name | length > 0
+        fail_msg: "Required variables are not properly defined"
+        success_msg: "Pre-flight checks passed - ready for deployment"
+      # Use this pattern to validate before making changes
+
+    # =========================================================================
+    # HANDLING COMMAND FAILURES
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 8: Check return code manually
+    # -------------------------------------------------------------------------
+    - name: Run command and check result
+      ansible.builtin.command:
+        cmd: which docker
+      register: docker_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: Handle based on docker availability
+      ansible.builtin.debug:
+        msg: |
+          {% if docker_check.rc == 0 %}
+          Docker is available at: {{ docker_check.stdout }}
+          {% else %}
+          Docker is NOT installed. Consider installing it.
+          {% endif %}
+
+    # -------------------------------------------------------------------------
+    # TASK 9: changed_when for idempotency
+    # -------------------------------------------------------------------------
+    - name: Command that reports correct change status
+      ansible.builtin.command:
+        cmd: echo "checking something"
+      register: check_result
+      # 'changed_when: false' - never report as changed
+      changed_when: false
+      # Use for read-only commands that don't modify state
+
+    - name: Command with conditional changed
+      ansible.builtin.shell:
+        cmd: |
+          if [ -f {{ demo_dir }}/marker.txt ]; then
+            echo "exists"
+          else
+            touch {{ demo_dir }}/marker.txt
+            echo "created"
+          fi
+      register: marker_result
+      # Only report changed if we actually created the file
+      changed_when: "'created' in marker_result.stdout"
+
+    # =========================================================================
+    # REAL-WORLD EXAMPLE: GARDEN-AGENT DEPLOYMENT
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 10: Robust deployment with error handling
+    # -------------------------------------------------------------------------
+    - name: Garden-agent deployment with error handling
+      block:
+        - name: Check if Docker is available
+          ansible.builtin.command: docker --version
+          changed_when: false
+
+        - name: Verify docker-compose is available
+          ansible.builtin.command: docker-compose --version
+          changed_when: false
+
+        - name: Simulate pulling latest code
+          ansible.builtin.debug:
+            msg: "Pulling latest garden-agent code..."
+
+        - name: Simulate building container
+          ansible.builtin.debug:
+            msg: "Building garden-agent container..."
+
+        - name: Simulate starting container
+          ansible.builtin.debug:
+            msg: "Starting garden-agent..."
+
+      rescue:
+        - name: Deployment failed
+          ansible.builtin.debug:
+            msg: |
+              Deployment of {{ app_name }} failed!
+              Possible causes:
+              - Docker not installed
+              - docker-compose not available
+              - Build errors in Dockerfile
+              - Network issues
+
+        - name: Check what went wrong
+          ansible.builtin.debug:
+            msg: "Run 'docker logs {{ app_name }}' for details"
+
+      always:
+        - name: Record deployment attempt
+          ansible.builtin.lineinfile:
+            path: "{{ demo_dir }}/deployments.log"
+            line: "{{ lookup('pipe', 'date') }} - Deployment attempted"
+            create: true
+            mode: '0644'
+
+    # =========================================================================
+    # ANY_ERRORS_FATAL
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 11: Explain any_errors_fatal
+    # -------------------------------------------------------------------------
+    - name: Explain any_errors_fatal
+      ansible.builtin.debug:
+        msg: |
+          ANY_ERRORS_FATAL:
+          =================
+
+          When running on multiple hosts, by default:
+          - If host A fails, host A stops
+          - Host B and C continue
+
+          With any_errors_fatal: true (at play level):
+          - If ANY host fails, ALL hosts stop immediately
+
+          Use case: Database migrations where partial success
+          would leave data in inconsistent state.
+
+          Example:
+          - name: Critical deployment
+            hosts: all
+            any_errors_fatal: true
+            tasks:
+              - name: Run database migration
+                ansible.builtin.command: ./migrate.sh
+
+    # =========================================================================
+    # MAX_FAIL_PERCENTAGE
+    # =========================================================================
+
+    # -------------------------------------------------------------------------
+    # TASK 12: Explain max_fail_percentage
+    # -------------------------------------------------------------------------
+    - name: Explain max_fail_percentage
+      ansible.builtin.debug:
+        msg: |
+          MAX_FAIL_PERCENTAGE:
+          ====================
+
+          Control how many hosts can fail before aborting.
+
+          - name: Rolling deployment
+            hosts: webservers
+            serial: 5              # 5 hosts at a time
+            max_fail_percentage: 20  # Stop if >20% fail
+
+          With 100 hosts and max_fail_percentage: 20
+          - Up to 20 hosts can fail
+          - If 21st host fails, playbook aborts
+          - Remaining hosts are left unchanged
+
+    # =========================================================================
+    # SUMMARY
+    # =========================================================================
+    - name: List demo files
+      ansible.builtin.find:
+        paths: "{{ demo_dir }}"
+        patterns: "*"
+      register: demo_files
+
+    - name: Lesson Summary
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  ERROR HANDLING COMPLETE"
+          - "============================================"
+          - ""
+          - "FILES CREATED: {{ demo_files.files | length }}"
+          - ""
+          - "KEY CONCEPTS LEARNED:"
+          - "  - ignore_errors: continue on failure"
+          - "  - failed_when: custom failure conditions"
+          - "  - changed_when: accurate change reporting"
+          - "  - block/rescue/always: try-catch-finally"
+          - "  - assert: validation checks"
+          - "  - any_errors_fatal: all-or-nothing"
+          - "  - max_fail_percentage: tolerate some failures"
+          - ""
+          - "BEST PRACTICES:"
+          - "  1. Use block/rescue for recovery logic"
+          - "  2. Always log errors in rescue blocks"
+          - "  3. Use assert for pre-flight checks"
+          - "  4. Use changed_when for idempotent commands"
+          - ""
+          - "NEXT: Try 14_facts_magic_variables.yml"
