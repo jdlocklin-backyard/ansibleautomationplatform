@@ -1,0 +1,778 @@
+---
+# =============================================================================
+# PROVISIONING PLAYBOOK: Create SSH-Ready Ubuntu VM (QEMU/KVM)
+# =============================================================================
+# IMPORTANT: This playbook runs ONLY on the Proxmox server itself!
+#            Do NOT run this from a remote Ansible control node.
+#            Install Ansible directly on your Proxmox host.
+#
+# WHAT THIS DOES:
+#   Creates a fully provisioned Ubuntu VM that is immediately ready for
+#   Ansible management over SSH. Supports two installation methods:
+#     - "iso":   Creates VM from scratch, boots Ubuntu ISO for manual install
+#     - "clone": Clones from an existing template VM, auto-configures SSH
+#
+# WHAT YOU'LL LEARN:
+#   - End-to-end QEMU/KVM VM provisioning with qm commands
+#   - Using 'qm guest exec' to configure a VM from the Proxmox host
+#   - Conditional task execution based on install method
+#   - Waiting for QEMU guest agent and extracting VM IP addresses
+#   - Producing a usable inventory line as output
+#
+# VMs vs CONTAINERS:
+#   This playbook creates full virtual machines (QEMU/KVM), NOT LXC containers.
+#   Use provision_lxc_simple.yml if you want a lightweight container instead.
+#   VMs provide full OS isolation with their own kernel - ideal for production
+#   workloads, Windows, or when you need hardware pass-through.
+#
+# PREREQUISITES:
+#   - Ansible installed on the Proxmox server
+#   - For "iso" method:
+#       Upload Ubuntu ISO to Proxmox:
+#         cd /var/lib/vz/template/iso/
+#         wget https://releases.ubuntu.com/24.04/ubuntu-24.04-live-server-amd64.iso
+#       Or upload via Proxmox UI: Datacenter > Storage > local > ISO Images
+#   - For "clone" method:
+#       An existing Ubuntu template VM (default ID: 9000)
+#       Create one with: qm template 9000
+#   - SSH keypair on Proxmox host (/root/.ssh/id_rsa.pub) - optional
+#
+# RUN THIS PLAYBOOK:
+#   # Default (ISO method):
+#   ansible-playbook provisioning/provision_vm_simple.yml
+#
+#   # Clone from template:
+#   ansible-playbook provisioning/provision_vm_simple.yml \
+#     -e "vm_install_method=clone"
+#
+# WITH CUSTOM VARIABLES:
+#   ansible-playbook provisioning/provision_vm_simple.yml \
+#     -e "vm_id=6102 vm_name=docker-host vm_cores=4 vm_memory=4096"
+# =============================================================================
+
+- name: Provision SSH-Ready Ubuntu VM (QEMU/KVM)
+  # ---------------------------------------------------------------------------
+  # HOST CONFIGURATION
+  # ---------------------------------------------------------------------------
+  # 'localhost' because we run directly ON the Proxmox server
+  # All qm commands execute locally - no SSH needed to the hypervisor
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  # Root privileges required for all qm commands
+  become: true
+
+  # ---------------------------------------------------------------------------
+  # VM CONFIGURATION VARIABLES
+  # ---------------------------------------------------------------------------
+  # All settings have sensible defaults. Override any with -e "var=value"
+  vars:
+    # =========================================================================
+    # VM IDENTITY
+    # =========================================================================
+    # vm_id: Unique numeric ID for the VM (100-999999)
+    # VMs and containers share the same ID namespace - don't overlap!
+    # Default 6101 avoids conflict with existing VMs/CTs (6000 range)
+    # Check existing IDs with: qm list && pct list
+    vm_id: 6101
+
+    # vm_name: The name for the VM (appears in Proxmox UI)
+    vm_name: "ubuntu-provision-vm"
+
+    # =========================================================================
+    # INSTALLATION METHOD
+    # =========================================================================
+    # vm_install_method: How to install the OS
+    #   "iso"   - Create VM from scratch, attach Ubuntu ISO, boot to installer
+    #             You must complete the install manually via Proxmox console.
+    #             After install, a post-install script is provided.
+    #   "clone" - Clone from an existing template VM (faster, fully automated)
+    #             Requires a pre-built template with QEMU guest agent installed.
+    vm_install_method: "iso"
+
+    # vm_clone_source: Template VM ID to clone from (for "clone" method only)
+    # Create a template: install Ubuntu in a VM, then run: qm template <vmid>
+    vm_clone_source: 9000
+
+    # =========================================================================
+    # ISO IMAGE (for "iso" method)
+    # =========================================================================
+    # vm_iso: Path to the Ubuntu ISO in Proxmox storage
+    # Upload first:
+    #   cd /var/lib/vz/template/iso/
+    #   wget https://releases.ubuntu.com/24.04/ubuntu-24.04-live-server-amd64.iso
+    # List available ISOs: ls /var/lib/vz/template/iso/
+    vm_iso: "local:iso/ubuntu-24.04-live-server-amd64.iso"
+
+    # =========================================================================
+    # HARDWARE CONFIGURATION
+    # =========================================================================
+    # vm_sockets: Number of CPU sockets (usually 1 for home lab)
+    vm_sockets: 1
+
+    # vm_cores: Number of cores per socket
+    vm_cores: 2
+
+    # vm_memory: RAM in MB
+    # VMs need more memory than containers - they run their own kernel
+    vm_memory: 2048
+
+    # =========================================================================
+    # STORAGE CONFIGURATION
+    # =========================================================================
+    # vm_storage: Where to store the VM disk
+    # List available storage: pvesm status
+    vm_storage: "local-lvm"
+
+    # vm_disk_size: Size of the primary disk
+    vm_disk_size: "20G"
+
+    # vm_disk_type: Disk bus type ('scsi' recommended for performance)
+    vm_disk_type: "scsi"
+
+    # vm_scsihw: SCSI controller type
+    # 'virtio-scsi-pci' is modern and provides the best performance
+    vm_scsihw: "virtio-scsi-pci"
+
+    # =========================================================================
+    # NETWORK CONFIGURATION
+    # =========================================================================
+    # vm_bridge: Network bridge to connect to (usually vmbr0)
+    # Check bridges with: brctl show
+    vm_bridge: "vmbr0"
+
+    # vm_net_model: Network card model
+    # 'virtio' is fastest (paravirtualized, included in Linux kernels)
+    vm_net_model: "virtio"
+
+    # =========================================================================
+    # VM OPTIONS
+    # =========================================================================
+    # vm_ostype: OS type hint for Proxmox optimizations
+    # 'l26' = Linux 2.6+ kernel (includes Ubuntu 24.04)
+    vm_ostype: "l26"
+
+    # vm_agent: Enable QEMU guest agent support
+    # The guest agent must also be installed INSIDE the VM (qemu-guest-agent)
+    # Required for: graceful shutdown, IP detection, qm guest exec
+    vm_agent: true
+
+    # vm_onboot: Start VM automatically when Proxmox host boots
+    vm_onboot: true
+
+    # =========================================================================
+    # ANSIBLE USER CONFIGURATION
+    # =========================================================================
+    # ansible_user_name: The user Ansible will connect as
+    ansible_user_name: "ansible"
+
+    # ansible_user_password: Password for the ansible user
+    ansible_user_password: "ansible"
+
+    # =========================================================================
+    # SSH KEY (optional - for key-based authentication)
+    # =========================================================================
+    # vm_ssh_public_key: Path to SSH public key on the Proxmox host
+    # This key is injected into the VM for the ansible user
+    vm_ssh_public_key: "/root/.ssh/id_rsa.pub"
+
+  # ---------------------------------------------------------------------------
+  # TASKS - End-to-end provisioning pipeline
+  # ---------------------------------------------------------------------------
+  tasks:
+
+    # =========================================================================
+    # TASK 1: Display Configuration Summary
+    # =========================================================================
+    # Always show what we're about to do before making changes
+    - name: "1 | Display provisioning plan"
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  Provisioning Ubuntu VM (QEMU/KVM)"
+          - "============================================"
+          - "  ID:        {{ vm_id }}"
+          - "  Name:      {{ vm_name }}"
+          - "  Method:    {{ vm_install_method }}"
+          - "  Storage:   {{ vm_storage }}"
+          - "  Disk:      {{ vm_disk_size }}"
+          - "  Memory:    {{ vm_memory }}MB"
+          - "  CPUs:      {{ vm_sockets }} socket(s) x {{ vm_cores }} core(s)"
+          - "  Network:   {{ vm_bridge }} ({{ vm_net_model }})"
+          - "  Agent:     {{ 'Enabled' if vm_agent else 'Disabled' }}"
+          - "  User:      {{ ansible_user_name }}"
+          - "============================================"
+
+    # =========================================================================
+    # TASK 2: Safety Check - Abort if VM Already Exists
+    # =========================================================================
+    # We never want to accidentally overwrite an existing VM
+    - name: "2 | Check if VM ID {{ vm_id }} already exists"
+      ansible.builtin.command:
+        cmd: "qm status {{ vm_id }}"
+      register: vm_exists_check
+      # Don't fail if VM doesn't exist - that's what we WANT
+      failed_when: false
+      changed_when: false
+
+    - name: "2a | Abort if VM {{ vm_id }} already exists"
+      ansible.builtin.fail:
+        msg: |
+          VM {{ vm_id }} already exists!
+          Current status: {{ vm_exists_check.stdout | default('unknown') }}
+
+          Options:
+            1. Use a different vm_id:    -e "vm_id=6102"
+            2. Delete existing:          qm destroy {{ vm_id }}
+            3. Stop and remove:          qm stop {{ vm_id }} && qm destroy {{ vm_id }}
+            4. List all VMs:             qm list
+      # rc=0 means the VM exists (qm status succeeded)
+      when: vm_exists_check.rc == 0
+
+    # =========================================================================
+    # TASK 3: Validate Install Method
+    # =========================================================================
+    - name: "3 | Validate install method"
+      ansible.builtin.fail:
+        msg: |
+          Invalid vm_install_method: '{{ vm_install_method }}'
+          Valid options are: 'iso' or 'clone'
+      when: vm_install_method not in ['iso', 'clone']
+
+    # #########################################################################
+    #
+    #  METHOD A: ISO INSTALLATION
+    #  Creates VM from scratch, attaches Ubuntu ISO, boots to installer.
+    #  User must complete OS installation via Proxmox console.
+    #
+    # #########################################################################
+    - name: "ISO | Create and boot VM from ISO"
+      when: vm_install_method == 'iso'
+      block:
+
+        # =====================================================================
+        # TASK 4-ISO: Create the VM Shell
+        # =====================================================================
+        # Create the VM with CPU, memory, network, and SCSI controller
+        # No disk yet - we add that in the next step
+        - name: "4-ISO | Create VM {{ vm_id }} with base configuration"
+          ansible.builtin.command:
+            cmd: >-
+              qm create {{ vm_id }}
+              --name {{ vm_name }}
+              --ostype {{ vm_ostype }}
+              --sockets {{ vm_sockets }}
+              --cores {{ vm_cores }}
+              --memory {{ vm_memory }}
+              --scsihw {{ vm_scsihw }}
+              --net0 {{ vm_net_model }},bridge={{ vm_bridge }}
+              {% if vm_agent %}--agent enabled=1{% endif %}
+              {% if vm_onboot %}--onboot 1{% endif %}
+          register: create_result
+
+        - name: "4a-ISO | Display creation result"
+          ansible.builtin.debug:
+            msg: "{{ create_result.stdout | default('VM created successfully') }}"
+
+        # =====================================================================
+        # TASK 5-ISO: Add Disk
+        # =====================================================================
+        # Attach a virtual disk on the SCSI bus
+        # Format: --scsi0 <storage>:<size>
+        - name: "5-ISO | Add {{ vm_disk_size }} disk to VM"
+          ansible.builtin.command:
+            cmd: "qm set {{ vm_id }} --{{ vm_disk_type }}0 {{ vm_storage }}:{{ vm_disk_size }}"
+
+        # =====================================================================
+        # TASK 6-ISO: Attach ISO as CD-ROM
+        # =====================================================================
+        # Mount the Ubuntu ISO as a virtual CD-ROM on ide2
+        # This is where the installer will boot from
+        - name: "6-ISO | Attach Ubuntu ISO as CD-ROM (ide2)"
+          ansible.builtin.command:
+            cmd: "qm set {{ vm_id }} --ide2 {{ vm_iso }},media=cdrom"
+
+        # =====================================================================
+        # TASK 7-ISO: Set Boot Order
+        # =====================================================================
+        # Boot from CD-ROM (ide2) first so the installer loads,
+        # then fall back to the hard disk (scsi0) for subsequent boots
+        - name: "7-ISO | Set boot order: ide2 (ISO) first, then scsi0 (disk)"
+          ansible.builtin.command:
+            cmd: "qm set {{ vm_id }} --boot order=ide2;{{ vm_disk_type }}0"
+
+        # =====================================================================
+        # TASK 8-ISO: Start the VM
+        # =====================================================================
+        - name: "8-ISO | Start VM {{ vm_id }}"
+          ansible.builtin.command:
+            cmd: "qm start {{ vm_id }}"
+
+        - name: "8a-ISO | Wait for VM to reach running state"
+          ansible.builtin.command:
+            cmd: "qm status {{ vm_id }}"
+          register: iso_status_check
+          until: "'running' in iso_status_check.stdout"
+          retries: 10
+          delay: 3
+          changed_when: false
+
+        # =====================================================================
+        # TASK 9-ISO: Display Installation Instructions
+        # =====================================================================
+        # The VM is now booting from the ISO - user must complete install manually
+        - name: "9-ISO | Display manual installation instructions"
+          ansible.builtin.debug:
+            msg:
+              - "============================================"
+              - "  VM {{ vm_id }} is BOOTING from Ubuntu ISO"
+              - "============================================"
+              - ""
+              - "  NEXT STEPS (manual):"
+              - "  1. Open the Proxmox web UI"
+              - "  2. Navigate to VM {{ vm_id }} ({{ vm_name }})"
+              - "  3. Click 'Console' to open the VNC console"
+              - "  4. Complete the Ubuntu Server installation"
+              - "     - Choose 'Install Ubuntu Server'"
+              - "     - Set up networking (DHCP recommended)"
+              - "     - Create your initial user"
+              - "     - Enable OpenSSH server when prompted"
+              - "     - Complete installation and reboot"
+              - ""
+              - "  AFTER INSTALLATION:"
+              - "  5. Change boot order to disk first:"
+              - "     qm set {{ vm_id }} --boot order={{ vm_disk_type }}0"
+              - "  6. Remove the ISO:"
+              - "     qm set {{ vm_id }} --ide2 none,media=cdrom"
+              - "============================================"
+
+        # =====================================================================
+        # TASK 10-ISO: Display Post-Install Helper Script
+        # =====================================================================
+        # After the user manually installs Ubuntu, they need to configure the
+        # VM for Ansible management. This script does that.
+        - name: "10-ISO | Display post-install configuration script"
+          ansible.builtin.debug:
+            msg:
+              - "============================================"
+              - "  POST-INSTALL: Run These Commands"
+              - "============================================"
+              - "  After Ubuntu installation is complete and"
+              - "  the VM has rebooted, SSH into it or use"
+              - "  the Proxmox console and run:"
+              - ""
+              - "  --- COPY FROM HERE ---"
+              - ""
+              - "  # Update packages"
+              - "  sudo apt-get update -qq"
+              - "  sudo apt-get install -y -qq qemu-guest-agent python3 openssh-server sudo"
+              - ""
+              - "  # Start QEMU guest agent"
+              - "  sudo systemctl enable qemu-guest-agent"
+              - "  sudo systemctl start qemu-guest-agent"
+              - ""
+              - "  # Create ansible user"
+              - "  sudo useradd -m -s /bin/bash {{ ansible_user_name }}"
+              - "  echo '{{ ansible_user_name }}:{{ ansible_user_password }}' | sudo chpasswd"
+              - ""
+              - "  # Grant NOPASSWD sudo"
+              - "  echo '{{ ansible_user_name }} ALL=(ALL) NOPASSWD:ALL' | sudo tee /etc/sudoers.d/{{ ansible_user_name }}"
+              - "  sudo chmod 440 /etc/sudoers.d/{{ ansible_user_name }}"
+              - ""
+              - "  # Configure SSH"
+              - "  sudo sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config"
+              - "  sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config"
+              - "  sudo systemctl enable ssh"
+              - "  sudo systemctl restart ssh"
+              - ""
+              - "  # (Optional) Set up SSH key for ansible user"
+              - "  sudo mkdir -p /home/{{ ansible_user_name }}/.ssh"
+              - "  sudo chmod 700 /home/{{ ansible_user_name }}/.ssh"
+              - "  # Copy your public key into authorized_keys:"
+              - "  # echo 'ssh-rsa AAAA...' | sudo tee /home/{{ ansible_user_name }}/.ssh/authorized_keys"
+              - "  # sudo chmod 600 /home/{{ ansible_user_name }}/.ssh/authorized_keys"
+              - "  # sudo chown -R {{ ansible_user_name }}:{{ ansible_user_name }} /home/{{ ansible_user_name }}/.ssh"
+              - ""
+              - "  --- END COPY ---"
+              - ""
+              - "  After running the above, change boot order"
+              - "  and remove ISO from the Proxmox host:"
+              - "    qm set {{ vm_id }} --boot order={{ vm_disk_type }}0"
+              - "    qm set {{ vm_id }} --ide2 none,media=cdrom"
+              - "============================================"
+
+    # #########################################################################
+    #
+    #  METHOD B: CLONE FROM TEMPLATE
+    #  Clones an existing template VM, configures resources, creates the
+    #  ansible user and SSH access via qm guest exec. Fully automated.
+    #
+    # #########################################################################
+    - name: "CLONE | Clone and configure VM from template"
+      when: vm_install_method == 'clone'
+      block:
+
+        # =====================================================================
+        # TASK 4-CLONE: Verify Template Exists
+        # =====================================================================
+        - name: "4-CLONE | Verify source template {{ vm_clone_source }} exists"
+          ansible.builtin.command:
+            cmd: "qm status {{ vm_clone_source }}"
+          register: template_check
+          failed_when: template_check.rc != 0
+          changed_when: false
+
+        # =====================================================================
+        # TASK 5-CLONE: Clone the Template
+        # =====================================================================
+        # --full creates a complete independent copy (not a linked clone)
+        # Linked clones are faster but depend on the template staying intact
+        - name: "5-CLONE | Clone template {{ vm_clone_source }} to VM {{ vm_id }}"
+          ansible.builtin.command:
+            cmd: >-
+              qm clone {{ vm_clone_source }} {{ vm_id }}
+              --name {{ vm_name }}
+              --full
+          register: clone_result
+
+        - name: "5a-CLONE | Display clone result"
+          ansible.builtin.debug:
+            msg: "{{ clone_result.stdout | default('Clone completed successfully') }}"
+
+        # =====================================================================
+        # TASK 6-CLONE: Configure VM Hardware
+        # =====================================================================
+        # The clone inherits the template's settings - override with our values
+        - name: "6-CLONE | Set CPU configuration"
+          ansible.builtin.command:
+            cmd: "qm set {{ vm_id }} --sockets {{ vm_sockets }} --cores {{ vm_cores }}"
+
+        - name: "6a-CLONE | Set memory configuration"
+          ansible.builtin.command:
+            cmd: "qm set {{ vm_id }} --memory {{ vm_memory }}"
+
+        - name: "6b-CLONE | Resize disk to {{ vm_disk_size }}"
+          ansible.builtin.command:
+            cmd: "qm resize {{ vm_id }} {{ vm_disk_type }}0 {{ vm_disk_size }}"
+          # May fail if disk is already larger than requested - that's OK
+          failed_when: false
+
+        - name: "6c-CLONE | Enable QEMU guest agent"
+          ansible.builtin.command:
+            cmd: "qm set {{ vm_id }} --agent enabled=1"
+          when: vm_agent
+
+        - name: "6d-CLONE | Set boot order to disk"
+          ansible.builtin.command:
+            cmd: "qm set {{ vm_id }} --boot order={{ vm_disk_type }}0"
+
+        - name: "6e-CLONE | Set onboot flag"
+          ansible.builtin.command:
+            cmd: "qm set {{ vm_id }} --onboot {{ '1' if vm_onboot else '0' }}"
+
+        # =====================================================================
+        # TASK 7-CLONE: Start the VM
+        # =====================================================================
+        - name: "7-CLONE | Start VM {{ vm_id }}"
+          ansible.builtin.command:
+            cmd: "qm start {{ vm_id }}"
+
+        - name: "7a-CLONE | Wait for VM to reach running state"
+          ansible.builtin.command:
+            cmd: "qm status {{ vm_id }}"
+          register: clone_status_check
+          until: "'running' in clone_status_check.stdout"
+          retries: 10
+          delay: 3
+          changed_when: false
+
+        # =====================================================================
+        # TASK 8-CLONE: Wait for QEMU Guest Agent
+        # =====================================================================
+        # The guest agent takes time to start after the VM boots
+        # We need it for qm guest exec to configure the VM
+        - name: "8-CLONE | Wait for QEMU guest agent to become ready"
+          ansible.builtin.command:
+            cmd: "qm guest cmd {{ vm_id }} ping"
+          register: agent_ping
+          until: agent_ping.rc == 0
+          retries: 20
+          delay: 5
+          failed_when: false
+          changed_when: false
+
+        - name: "8a-CLONE | Fail if guest agent is not responding"
+          ansible.builtin.fail:
+            msg: |
+              QEMU guest agent is not responding on VM {{ vm_id }}.
+              Make sure qemu-guest-agent is installed in the template VM.
+
+              To fix:
+                1. Boot the template VM: qm start {{ vm_clone_source }}
+                2. Install agent: apt-get install -y qemu-guest-agent
+                3. Enable agent: systemctl enable qemu-guest-agent
+                4. Stop and re-template: qm stop {{ vm_clone_source }} && qm template {{ vm_clone_source }}
+          when: agent_ping.rc != 0
+
+        # =====================================================================
+        # TASK 9-CLONE: Create Ansible User via Guest Agent
+        # =====================================================================
+        # qm guest exec runs commands inside the VM using the QEMU guest agent
+        # This bypasses the need for SSH - perfect for initial provisioning
+        - name: "9-CLONE | Create '{{ ansible_user_name }}' user"
+          ansible.builtin.command:
+            cmd: >-
+              qm guest exec {{ vm_id }} --
+              bash -c 'useradd -m -s /bin/bash {{ ansible_user_name }} 2>/dev/null || true'
+          changed_when: true
+
+        - name: "9a-CLONE | Set password for '{{ ansible_user_name }}'"
+          ansible.builtin.command:
+            cmd: >-
+              qm guest exec {{ vm_id }} --
+              bash -c 'echo "{{ ansible_user_name }}:{{ ansible_user_password }}" | chpasswd'
+          changed_when: true
+          no_log: true
+
+        # =====================================================================
+        # TASK 10-CLONE: Configure Sudo Access
+        # =====================================================================
+        # Grant NOPASSWD sudo - required for Ansible become to work
+        - name: "10-CLONE | Add '{{ ansible_user_name }}' to sudo group"
+          ansible.builtin.command:
+            cmd: >-
+              qm guest exec {{ vm_id }} --
+              bash -c 'usermod -aG sudo {{ ansible_user_name }}'
+          changed_when: true
+
+        - name: "10a-CLONE | Grant NOPASSWD sudo to '{{ ansible_user_name }}'"
+          ansible.builtin.command:
+            cmd: >-
+              qm guest exec {{ vm_id }} --
+              bash -c 'echo "{{ ansible_user_name }} ALL=(ALL) NOPASSWD:ALL"
+              > /etc/sudoers.d/{{ ansible_user_name }}
+              && chmod 440 /etc/sudoers.d/{{ ansible_user_name }}'
+          changed_when: true
+
+        # =====================================================================
+        # TASK 11-CLONE: Install Required Packages
+        # =====================================================================
+        - name: "11-CLONE | Update apt cache"
+          ansible.builtin.command:
+            cmd: >-
+              qm guest exec {{ vm_id }} --
+              bash -c 'apt-get update -qq'
+          changed_when: true
+
+        - name: "11a-CLONE | Install python3, openssh-server, qemu-guest-agent"
+          ansible.builtin.command:
+            cmd: >-
+              qm guest exec {{ vm_id }} --
+              bash -c 'DEBIAN_FRONTEND=noninteractive
+              apt-get install -y -qq python3 openssh-server sudo qemu-guest-agent'
+          changed_when: true
+
+        # =====================================================================
+        # TASK 12-CLONE: Configure SSH Server
+        # =====================================================================
+        - name: "12-CLONE | Enable PasswordAuthentication in sshd_config"
+          ansible.builtin.command:
+            cmd: >-
+              qm guest exec {{ vm_id }} --
+              bash -c 'sed -i "s/#PasswordAuthentication.*/PasswordAuthentication yes/" /etc/ssh/sshd_config
+              && sed -i "s/PasswordAuthentication no/PasswordAuthentication yes/" /etc/ssh/sshd_config'
+          changed_when: true
+
+        - name: "12a-CLONE | Enable and restart SSH service"
+          ansible.builtin.command:
+            cmd: >-
+              qm guest exec {{ vm_id }} --
+              bash -c 'systemctl enable ssh && systemctl restart ssh'
+          changed_when: true
+
+        # =====================================================================
+        # TASK 13-CLONE: Set Up SSH Keys (Optional)
+        # =====================================================================
+        - name: "13-CLONE | Check if SSH public key exists on Proxmox host"
+          ansible.builtin.stat:
+            path: "{{ vm_ssh_public_key }}"
+          register: ssh_key_stat
+
+        - name: "13a-CLONE | Inject SSH key for {{ ansible_user_name }}"
+          when: ssh_key_stat.stat.exists
+          block:
+            - name: "13b-CLONE | Read SSH public key"
+              ansible.builtin.slurp:
+                src: "{{ vm_ssh_public_key }}"
+              register: ssh_key_content
+
+            - name: "13c-CLONE | Create .ssh directory for {{ ansible_user_name }}"
+              ansible.builtin.command:
+                cmd: >-
+                  qm guest exec {{ vm_id }} --
+                  bash -c 'mkdir -p /home/{{ ansible_user_name }}/.ssh
+                  && chmod 700 /home/{{ ansible_user_name }}/.ssh'
+              changed_when: true
+
+            - name: "13d-CLONE | Write authorized_keys for {{ ansible_user_name }}"
+              ansible.builtin.command:
+                cmd: >-
+                  qm guest exec {{ vm_id }} --
+                  bash -c 'echo "{{ ssh_key_content.content | b64decode | trim }}"
+                  > /home/{{ ansible_user_name }}/.ssh/authorized_keys
+                  && chmod 600 /home/{{ ansible_user_name }}/.ssh/authorized_keys
+                  && chown -R {{ ansible_user_name }}:{{ ansible_user_name }} /home/{{ ansible_user_name }}/.ssh'
+              changed_when: true
+
+        - name: "13e-CLONE | Warn if no SSH public key found"
+          ansible.builtin.debug:
+            msg:
+              - "NOTE: No SSH public key found at {{ vm_ssh_public_key }}"
+              - "SSH key-based authentication will NOT be available."
+              - "You can still connect with: ssh {{ ansible_user_name }}@<ip> (password: {{ ansible_user_password }})"
+              - "Generate a key with: ssh-keygen -t rsa -b 4096"
+          when: not ssh_key_stat.stat.exists
+
+        # =====================================================================
+        # TASK 14-CLONE: Get VM IP Address
+        # =====================================================================
+        # Wait a moment for network to settle, then query the guest agent
+        - name: "14-CLONE | Wait for network to settle"
+          ansible.builtin.pause:
+            seconds: 5
+
+        - name: "14a-CLONE | Get VM IP address from guest agent"
+          ansible.builtin.shell:
+            cmd: >-
+              qm guest cmd {{ vm_id }} network-get-interfaces |
+              python3 -c "
+              import sys, json
+              data = json.load(sys.stdin)
+              for iface in data:
+                if iface.get('name') not in ('lo', 'localhost'):
+                  for addr in iface.get('ip-addresses', []):
+                    if addr.get('ip-address-type') == 'ipv4':
+                      print(addr['ip-address'])
+                      sys.exit(0)
+              print('<pending>')
+              "
+          register: vm_ip_result
+          changed_when: false
+          failed_when: false
+
+        # Retry once if IP wasn't available yet
+        - name: "14b-CLONE | Retry IP detection if needed"
+          ansible.builtin.shell:
+            cmd: >-
+              qm guest cmd {{ vm_id }} network-get-interfaces |
+              python3 -c "
+              import sys, json
+              data = json.load(sys.stdin)
+              for iface in data:
+                if iface.get('name') not in ('lo', 'localhost'):
+                  for addr in iface.get('ip-addresses', []):
+                    if addr.get('ip-address-type') == 'ipv4':
+                      print(addr['ip-address'])
+                      sys.exit(0)
+              print('<pending>')
+              "
+          register: vm_ip_retry
+          changed_when: false
+          failed_when: false
+          when: vm_ip_result.stdout | default('') | trim in ['', '<pending>']
+
+        # Store the final IP in a clean variable
+        - name: "14c-CLONE | Store final IP address"
+          ansible.builtin.set_fact:
+            vm_final_ip: >-
+              {{ (vm_ip_result.stdout | default('') | trim)
+                 if (vm_ip_result.stdout | default('') | trim) not in ['', '<pending>']
+                 else (vm_ip_retry.stdout | default('<pending>') | trim) }}
+
+    # #########################################################################
+    #
+    #  FINAL SUMMARY (both methods)
+    #
+    # #########################################################################
+
+    # =========================================================================
+    # TASK 15: Final Summary for ISO Method
+    # =========================================================================
+    - name: "15 | Display ISO provisioning summary"
+      when: vm_install_method == 'iso'
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  VM Created - Manual Installation Required"
+          - "============================================"
+          - "  ID:        {{ vm_id }}"
+          - "  Name:      {{ vm_name }}"
+          - "  Method:    ISO (manual install)"
+          - "  Status:    Booting from ISO"
+          - "  Resources: {{ vm_sockets * vm_cores }} vCPUs, {{ vm_memory }}MB RAM, {{ vm_disk_size }} disk"
+          - "============================================"
+          - ""
+          - "  WHAT TO DO NOW:"
+          - "  1. Open Proxmox UI > VM {{ vm_id }} > Console"
+          - "  2. Complete Ubuntu Server installation"
+          - "  3. Run the post-install script (shown above)"
+          - "  4. Then test with:"
+          - "     ssh {{ ansible_user_name }}@<VM_IP>"
+          - ""
+          - "  PROXMOX COMMANDS:"
+          - "    Console:   Use Proxmox web UI (VNC)"
+          - "    Stop:      qm stop {{ vm_id }}"
+          - "    Start:     qm start {{ vm_id }}"
+          - "    Destroy:   qm stop {{ vm_id }} && qm destroy {{ vm_id }}"
+          - "    Config:    qm config {{ vm_id }}"
+          - ""
+          - "  AFTER INSTALL - ANSIBLE INVENTORY LINE:"
+          - "    {{ vm_name }} ansible_host=<VM_IP> ansible_user={{ ansible_user_name }} ansible_password={{ ansible_user_password }}"
+          - ""
+          - "  QUICK TEST (after post-install script):"
+          - "    ansible -i '<VM_IP>,' -u {{ ansible_user_name }} -m ping all -k"
+          - "============================================"
+
+    # =========================================================================
+    # TASK 16: Final Summary for Clone Method
+    # =========================================================================
+    - name: "16 | Display clone provisioning summary"
+      when: vm_install_method == 'clone'
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  VM Provisioned Successfully!"
+          - "============================================"
+          - "  ID:        {{ vm_id }}"
+          - "  Name:      {{ vm_name }}"
+          - "  Method:    Clone (from template {{ vm_clone_source }})"
+          - "  Status:    Running"
+          - "  IP:        {{ vm_final_ip }}"
+          - "  Resources: {{ vm_sockets * vm_cores }} vCPUs, {{ vm_memory }}MB RAM, {{ vm_disk_size }} disk"
+          - "============================================"
+          - ""
+          - "  SSH ACCESS:"
+          - "    ssh {{ ansible_user_name }}@{{ vm_final_ip }}"
+          - ""
+          - "  CREDENTIALS:"
+          - "    User:     {{ ansible_user_name }}"
+          - "    Password: {{ ansible_user_password }}"
+          - "    Sudo:     NOPASSWD enabled"
+          - "    SSH key:  {{ 'Configured' if (ssh_key_stat.stat.exists | default(false)) else 'Not configured' }}"
+          - ""
+          - "  ANSIBLE INVENTORY LINE:"
+          - "    {{ vm_name }} ansible_host={{ vm_final_ip }} ansible_user={{ ansible_user_name }} ansible_password={{ ansible_user_password }}"
+          - ""
+          - "  PROXMOX COMMANDS:"
+          - "    Console:   Use Proxmox web UI (VNC)"
+          - "    Stop:      qm stop {{ vm_id }}"
+          - "    Start:     qm start {{ vm_id }}"
+          - "    Shutdown:  qm shutdown {{ vm_id }} (graceful, needs agent)"
+          - "    Destroy:   qm stop {{ vm_id }} && qm destroy {{ vm_id }}"
+          - "    Config:    qm config {{ vm_id }}"
+          - "    Snapshot:  qm snapshot {{ vm_id }} <name>"
+          - ""
+          - "  QUICK TEST:"
+          - "    ansible -i '{{ vm_final_ip }},' -u {{ ansible_user_name }} -m ping all -k"
+          - "============================================"

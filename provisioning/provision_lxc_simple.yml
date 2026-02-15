@@ -1,0 +1,509 @@
+---
+# =============================================================================
+# PROVISIONING PLAYBOOK: Create SSH-Ready Ubuntu LXC Container
+# =============================================================================
+# IMPORTANT: This playbook runs ONLY on the Proxmox server itself!
+#            Do NOT run this from a remote Ansible control node.
+#            Install Ansible directly on your Proxmox host.
+#
+# WHAT THIS DOES:
+#   Creates a fully provisioned Ubuntu LXC container that is immediately
+#   ready for Ansible management over SSH. Combines container creation AND
+#   SSH/user configuration into a single playbook (replaces the two-step
+#   process of proxmox_01 + configure_lxc_ssh.sh).
+#
+# WHAT YOU'LL LEARN:
+#   - End-to-end LXC provisioning with pct commands
+#   - Using 'pct exec' to configure a container from the Proxmox host
+#   - Building complex shell commands with set_fact
+#   - Waiting for services and extracting dynamic information
+#   - Producing a usable inventory line as output
+#
+# PREREQUISITES:
+#   - Ansible installed on the Proxmox server
+#   - Ubuntu 24.04 LXC template downloaded:
+#       pveam download local ubuntu-24.04-standard_24.04-2_amd64.tar.zst
+#   - SSH keypair on Proxmox host (/root/.ssh/id_rsa.pub)
+#
+# RUN THIS PLAYBOOK:
+#   ansible-playbook provisioning/provision_lxc_simple.yml
+#
+# WITH CUSTOM VARIABLES:
+#   ansible-playbook provisioning/provision_lxc_simple.yml \
+#     -e "ct_id=6101 ct_hostname=docker-host ct_cores=4 ct_memory=4096"
+# =============================================================================
+
+- name: Provision SSH-Ready Ubuntu LXC Container
+  # ---------------------------------------------------------------------------
+  # HOST CONFIGURATION
+  # ---------------------------------------------------------------------------
+  # 'localhost' because we run directly ON the Proxmox server
+  # All pct commands execute locally - no SSH needed
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  # Root privileges required for all pct commands
+  become: true
+
+  # ---------------------------------------------------------------------------
+  # CONTAINER CONFIGURATION VARIABLES
+  # ---------------------------------------------------------------------------
+  # All settings have sensible defaults. Override any with -e "var=value"
+  vars:
+    # =========================================================================
+    # CONTAINER IDENTITY
+    # =========================================================================
+    # ct_id: Unique numeric ID for the container (100-999999)
+    # Default 6100 avoids conflict with existing containers (6000 range)
+    # Check existing IDs with: pct list
+    ct_id: 6100
+
+    # ct_hostname: The hostname assigned inside the container
+    ct_hostname: "ubuntu-provision"
+
+    # =========================================================================
+    # TEMPLATE AND STORAGE
+    # =========================================================================
+    # ct_template: The Ubuntu 24.04 LXC template
+    # Download first: pveam download local ubuntu-24.04-standard_24.04-2_amd64.tar.zst
+    # List downloaded: pveam list local
+    ct_template: "local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+
+    # ct_storage: Where to store the container's root filesystem
+    # List available storage: pvesm status
+    ct_storage: "local-lvm"
+
+    # =========================================================================
+    # RESOURCE ALLOCATION
+    # =========================================================================
+    # ct_cores: Number of CPU cores (soft limit, containers share cores)
+    ct_cores: 2
+
+    # ct_memory: RAM in MB
+    ct_memory: 2048
+
+    # ct_swap: Swap space in MB
+    ct_swap: 512
+
+    # ct_rootfs_size: Root filesystem size in GB
+    ct_rootfs_size: 10
+
+    # =========================================================================
+    # NETWORK CONFIGURATION
+    # =========================================================================
+    # ct_bridge: Network bridge to attach to (usually vmbr0)
+    # Check bridges with: brctl show
+    ct_bridge: "vmbr0"
+
+    # ct_ip: IP configuration - 'dhcp' or static like '192.168.1.100/24'
+    ct_ip: "dhcp"
+
+    # ct_gateway: Gateway IP (only needed for static IP, leave empty for DHCP)
+    ct_gateway: ""
+
+    # =========================================================================
+    # ACCESS SETTINGS
+    # =========================================================================
+    # ct_password: Root password for the container
+    ct_password: "ansible"
+
+    # ct_ssh_public_key: Path to SSH public key on the Proxmox host
+    # This key is copied into the container for both root and ansible user
+    ct_ssh_public_key: "/root/.ssh/id_rsa.pub"
+
+    # =========================================================================
+    # ANSIBLE USER CONFIGURATION
+    # =========================================================================
+    # ansible_user_name: The user Ansible will connect as
+    ansible_user_name: "ansible"
+
+    # ansible_user_password: Password for the ansible user
+    ansible_user_password: "ansible"
+
+    # =========================================================================
+    # CONTAINER OPTIONS
+    # =========================================================================
+    # ct_unprivileged: Unprivileged container (more secure, recommended)
+    ct_unprivileged: true
+
+    # ct_onboot: Start container when Proxmox host boots
+    ct_onboot: true
+
+    # =========================================================================
+    # PACKAGES TO INSTALL INSIDE THE CONTAINER
+    # =========================================================================
+    ct_packages:
+      - openssh-server
+      - python3
+      - python3-apt
+      - sudo
+
+  # ---------------------------------------------------------------------------
+  # TASKS - End-to-end provisioning pipeline
+  # ---------------------------------------------------------------------------
+  tasks:
+
+    # =========================================================================
+    # TASK 1: Display Configuration Summary
+    # =========================================================================
+    # Always show what we're about to do before making changes
+    - name: "1 | Display provisioning plan"
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  Provisioning Ubuntu LXC Container"
+          - "============================================"
+          - "  ID:        {{ ct_id }}"
+          - "  Hostname:  {{ ct_hostname }}"
+          - "  Template:  {{ ct_template }}"
+          - "  Storage:   {{ ct_storage }}"
+          - "  Disk:      {{ ct_rootfs_size }}GB"
+          - "  Memory:    {{ ct_memory }}MB  |  Swap: {{ ct_swap }}MB"
+          - "  Cores:     {{ ct_cores }}"
+          - "  Network:   {{ ct_bridge }} ({{ ct_ip }})"
+          - "  User:      {{ ansible_user_name }}"
+          - "============================================"
+
+    # =========================================================================
+    # TASK 2: Safety Check - Abort if Container Already Exists
+    # =========================================================================
+    # We never want to accidentally overwrite an existing container
+    - name: "2 | Check if container ID {{ ct_id }} already exists"
+      ansible.builtin.command:
+        cmd: "pct status {{ ct_id }}"
+      register: ct_exists_check
+      # Don't fail if container doesn't exist - that's what we WANT
+      failed_when: false
+      changed_when: false
+
+    - name: "2a | Abort if container {{ ct_id }} already exists"
+      ansible.builtin.fail:
+        msg: |
+          Container {{ ct_id }} already exists!
+          Current status: {{ ct_exists_check.stdout | default('unknown') }}
+
+          Options:
+            1. Use a different ct_id:    -e "ct_id=6101"
+            2. Delete existing:          pct destroy {{ ct_id }}
+            3. Stop and remove:          pct stop {{ ct_id }} && pct destroy {{ ct_id }}
+            4. List all containers:      pct list
+      # rc=0 means the container exists (pct status succeeded)
+      when: ct_exists_check.rc == 0
+
+    # =========================================================================
+    # TASK 3: Verify Template Exists
+    # =========================================================================
+    - name: "3 | Verify LXC template is available"
+      ansible.builtin.command:
+        cmd: "pveam list local"
+      register: template_list
+      changed_when: false
+
+    - name: "3a | Show available templates (verbose only)"
+      ansible.builtin.debug:
+        msg: "Available templates: {{ template_list.stdout_lines }}"
+        verbosity: 1
+
+    # =========================================================================
+    # TASK 4: Build the pct create Command Dynamically
+    # =========================================================================
+    # We use set_fact to construct the command piece by piece
+    # This makes it easy to read, debug, and extend
+    - name: "4 | Build pct create command"
+      ansible.builtin.set_fact:
+        pct_command: >-
+          pct create {{ ct_id }} {{ ct_template }}
+          --hostname {{ ct_hostname }}
+          --storage {{ ct_storage }}
+          --rootfs {{ ct_storage }}:{{ ct_rootfs_size }}
+          --cores {{ ct_cores }}
+          --memory {{ ct_memory }}
+          --swap {{ ct_swap }}
+          --net0 name=eth0,bridge={{ ct_bridge }}{% if ct_ip == 'dhcp' %},ip=dhcp{% else %},ip={{ ct_ip }}{% if ct_gateway %},gw={{ ct_gateway }}{% endif %}{% endif %}
+
+          --password {{ ct_password }}
+          {% if ct_unprivileged %}--unprivileged 1{% endif %}
+
+          {% if ct_onboot %}--onboot 1{% endif %}
+
+    - name: "4a | Show the pct create command (for learning)"
+      ansible.builtin.debug:
+        msg: "{{ pct_command }}"
+
+    # =========================================================================
+    # TASK 5: Create the Container
+    # =========================================================================
+    - name: "5 | Create LXC container {{ ct_id }}"
+      ansible.builtin.shell:
+        # Using shell (not command) because of the complex multi-line string
+        cmd: "{{ pct_command }}"
+      register: create_result
+
+    - name: "5a | Display creation result"
+      ansible.builtin.debug:
+        msg: "{{ create_result.stdout_lines | default(['Container created successfully']) }}"
+
+    # =========================================================================
+    # TASK 6: Start the Container
+    # =========================================================================
+    - name: "6 | Start container {{ ct_id }}"
+      ansible.builtin.command:
+        cmd: "pct start {{ ct_id }}"
+
+    # =========================================================================
+    # TASK 7: Wait for Container to be Running
+    # =========================================================================
+    # Poll pct status until the container reports 'running'
+    - name: "7 | Wait for container to reach running state"
+      ansible.builtin.command:
+        cmd: "pct status {{ ct_id }}"
+      register: status_check
+      until: "'running' in status_check.stdout"
+      retries: 10
+      delay: 3
+      changed_when: false
+
+    # Give the container a moment to fully initialize its init system
+    - name: "7a | Wait for container init to settle"
+      ansible.builtin.pause:
+        seconds: 5
+
+    # =========================================================================
+    # TASK 8: Install Required Packages
+    # =========================================================================
+    # Use pct exec to run commands inside the container from the Proxmox host
+    # This is the key technique - no SSH needed at this stage
+    - name: "8 | Update apt cache inside container"
+      ansible.builtin.command:
+        cmd: "pct exec {{ ct_id }} -- bash -c 'apt-get update -qq'"
+      changed_when: true
+
+    - name: "8a | Install packages: {{ ct_packages | join(', ') }}"
+      ansible.builtin.command:
+        cmd: >-
+          pct exec {{ ct_id }} -- bash -c
+          'DEBIAN_FRONTEND=noninteractive apt-get install -y -qq {{ ct_packages | join(" ") }}'
+      changed_when: true
+
+    # =========================================================================
+    # TASK 9: Create the Ansible User
+    # =========================================================================
+    # Create a dedicated user for Ansible to connect as (not root)
+    - name: "9 | Create '{{ ansible_user_name }}' user"
+      ansible.builtin.command:
+        cmd: >-
+          pct exec {{ ct_id }} -- bash -c
+          'useradd -m -s /bin/bash {{ ansible_user_name }} 2>/dev/null || true'
+      changed_when: true
+
+    - name: "9a | Set password for '{{ ansible_user_name }}' user"
+      ansible.builtin.command:
+        cmd: >-
+          pct exec {{ ct_id }} -- bash -c
+          'echo "{{ ansible_user_name }}:{{ ansible_user_password }}" | chpasswd'
+      changed_when: true
+      no_log: true
+
+    # =========================================================================
+    # TASK 10: Configure Sudo Access
+    # =========================================================================
+    # Grant NOPASSWD sudo - required for Ansible become to work without prompts
+    - name: "10 | Add '{{ ansible_user_name }}' to sudo group"
+      ansible.builtin.command:
+        cmd: >-
+          pct exec {{ ct_id }} -- bash -c
+          'usermod -aG sudo {{ ansible_user_name }}'
+      changed_when: true
+
+    - name: "10a | Grant NOPASSWD sudo to '{{ ansible_user_name }}'"
+      ansible.builtin.command:
+        cmd: >-
+          pct exec {{ ct_id }} -- bash -c
+          'echo "{{ ansible_user_name }} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/{{ ansible_user_name }}
+          && chmod 440 /etc/sudoers.d/{{ ansible_user_name }}'
+      changed_when: true
+
+    # =========================================================================
+    # TASK 11: Configure SSH Server
+    # =========================================================================
+    # Enable root login and password auth so Ansible can connect immediately
+    - name: "11 | Configure SSH: PermitRootLogin yes"
+      ansible.builtin.command:
+        cmd: >-
+          pct exec {{ ct_id }} -- bash -c
+          'sed -i "s/#PermitRootLogin.*/PermitRootLogin yes/" /etc/ssh/sshd_config
+          && sed -i "s/PermitRootLogin prohibit-password/PermitRootLogin yes/" /etc/ssh/sshd_config'
+      changed_when: true
+
+    - name: "11a | Configure SSH: PasswordAuthentication yes"
+      ansible.builtin.command:
+        cmd: >-
+          pct exec {{ ct_id }} -- bash -c
+          'sed -i "s/#PasswordAuthentication.*/PasswordAuthentication yes/" /etc/ssh/sshd_config
+          && sed -i "s/PasswordAuthentication no/PasswordAuthentication yes/" /etc/ssh/sshd_config'
+      changed_when: true
+
+    - name: "11b | Enable and restart SSH service"
+      ansible.builtin.command:
+        cmd: >-
+          pct exec {{ ct_id }} -- bash -c
+          'systemctl enable ssh && systemctl restart ssh'
+      changed_when: true
+
+    # =========================================================================
+    # TASK 12: Set Up SSH Keys
+    # =========================================================================
+    # Copy the Proxmox host's public key into the container for both users
+    # This enables passwordless SSH from the Proxmox host
+    - name: "12 | Check if SSH public key exists on Proxmox host"
+      ansible.builtin.stat:
+        path: "{{ ct_ssh_public_key }}"
+      register: ssh_key_stat
+
+    - name: "12a | Set up SSH keys for root and {{ ansible_user_name }}"
+      when: ssh_key_stat.stat.exists
+      block:
+        # --- Root user SSH keys ---
+        - name: "12b | Create /root/.ssh directory in container"
+          ansible.builtin.command:
+            cmd: "pct exec {{ ct_id }} -- mkdir -p /root/.ssh"
+          changed_when: true
+
+        - name: "12c | Copy SSH public key to root's authorized_keys"
+          ansible.builtin.command:
+            cmd: "pct push {{ ct_id }} {{ ct_ssh_public_key }} /root/.ssh/authorized_keys"
+          changed_when: true
+
+        - name: "12d | Set root SSH directory permissions"
+          ansible.builtin.command:
+            cmd: "pct exec {{ ct_id }} -- chmod 700 /root/.ssh"
+          changed_when: true
+
+        - name: "12e | Set root authorized_keys permissions"
+          ansible.builtin.command:
+            cmd: "pct exec {{ ct_id }} -- chmod 600 /root/.ssh/authorized_keys"
+          changed_when: true
+
+        # --- Ansible user SSH keys ---
+        - name: "12f | Create {{ ansible_user_name }} .ssh directory"
+          ansible.builtin.command:
+            cmd: >-
+              pct exec {{ ct_id }} -- bash -c
+              'mkdir -p /home/{{ ansible_user_name }}/.ssh
+              && chmod 700 /home/{{ ansible_user_name }}/.ssh'
+          changed_when: true
+
+        - name: "12g | Copy SSH key to {{ ansible_user_name }} authorized_keys"
+          ansible.builtin.command:
+            cmd: >-
+              pct exec {{ ct_id }} -- bash -c
+              'cp /root/.ssh/authorized_keys /home/{{ ansible_user_name }}/.ssh/authorized_keys'
+          changed_when: true
+
+        - name: "12h | Fix ownership and permissions for {{ ansible_user_name }} .ssh"
+          ansible.builtin.command:
+            cmd: >-
+              pct exec {{ ct_id }} -- bash -c
+              'chown -R {{ ansible_user_name }}:{{ ansible_user_name }} /home/{{ ansible_user_name }}/.ssh
+              && chmod 600 /home/{{ ansible_user_name }}/.ssh/authorized_keys'
+          changed_when: true
+
+    - name: "12i | Warn if no SSH public key found"
+      ansible.builtin.debug:
+        msg:
+          - "WARNING: No SSH public key found at {{ ct_ssh_public_key }}"
+          - "SSH key-based authentication will NOT be available."
+          - "Generate a key with: ssh-keygen -t rsa -b 4096"
+      when: not ssh_key_stat.stat.exists
+
+    # =========================================================================
+    # TASK 13: Wait for Network and Get IP Address
+    # =========================================================================
+    - name: "13 | Wait for DHCP lease"
+      ansible.builtin.pause:
+        seconds: 5
+      when: ct_ip == 'dhcp'
+
+    - name: "13a | Get container IP address"
+      ansible.builtin.shell:
+        cmd: "pct exec {{ ct_id }} -- hostname -I | awk '{print $1}'"
+      register: container_ip
+      changed_when: false
+      # May fail briefly if network isn't ready yet
+      failed_when: false
+
+    # Retry once if we didn't get an IP (DHCP can be slow)
+    - name: "13b | Retry IP detection if needed"
+      ansible.builtin.shell:
+        cmd: "pct exec {{ ct_id }} -- hostname -I | awk '{print $1}'"
+      register: container_ip_retry
+      changed_when: false
+      failed_when: false
+      when: container_ip.stdout | default('') | trim == ''
+
+    # Store the final IP in a clean variable
+    - name: "13c | Store final IP address"
+      ansible.builtin.set_fact:
+        ct_final_ip: >-
+          {{ (container_ip.stdout | default('') | trim) or
+             (container_ip_retry.stdout | default('') | trim) or
+             '<pending>' }}
+
+    # =========================================================================
+    # TASK 14: Verify SSH is Accessible
+    # =========================================================================
+    - name: "14 | Verify SSH is listening on port 22"
+      ansible.builtin.command:
+        cmd: >-
+          pct exec {{ ct_id }} -- bash -c
+          'ss -tlnp | grep -q ":22 " && echo "SSH is listening on port 22"'
+      register: ssh_verify
+      changed_when: false
+      failed_when: false
+
+    - name: "14a | Display SSH verification"
+      ansible.builtin.debug:
+        msg: "{{ ssh_verify.stdout | default('SSH verification skipped') }}"
+        verbosity: 0
+
+    # =========================================================================
+    # TASK 15: Final Summary
+    # =========================================================================
+    - name: "15 | Display provisioning summary"
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  LXC Container Provisioned Successfully!"
+          - "============================================"
+          - "  ID:        {{ ct_id }}"
+          - "  Hostname:  {{ ct_hostname }}"
+          - "  Status:    Running"
+          - "  IP:        {{ ct_final_ip }}"
+          - "  Template:  {{ ct_template | basename }}"
+          - "  Resources: {{ ct_cores }} cores, {{ ct_memory }}MB RAM, {{ ct_rootfs_size }}GB disk"
+          - "============================================"
+          - ""
+          - "  SSH ACCESS:"
+          - "    ssh root@{{ ct_final_ip }}"
+          - "    ssh {{ ansible_user_name }}@{{ ct_final_ip }}"
+          - ""
+          - "  CREDENTIALS:"
+          - "    root password:              {{ ct_password }}"
+          - "    {{ ansible_user_name }} user / password:    {{ ansible_user_password }}"
+          - "    sudo:                       NOPASSWD enabled"
+          - "    SSH key auth:               {{ 'Configured' if ssh_key_stat.stat.exists else 'Not configured' }}"
+          - ""
+          - "  ANSIBLE INVENTORY LINE:"
+          - "    {{ ct_hostname }} ansible_host={{ ct_final_ip }} ansible_user={{ ansible_user_name }} ansible_password={{ ansible_user_password }}"
+          - ""
+          - "  PROXMOX COMMANDS:"
+          - "    Console:   pct enter {{ ct_id }}"
+          - "    Stop:      pct stop {{ ct_id }}"
+          - "    Start:     pct start {{ ct_id }}"
+          - "    Destroy:   pct stop {{ ct_id }} && pct destroy {{ ct_id }}"
+          - "    Config:    pct config {{ ct_id }}"
+          - ""
+          - "  QUICK TEST:"
+          - "    ansible -i '{{ ct_final_ip }},' -u {{ ansible_user_name }} -m ping all -k"
+          - "============================================"
