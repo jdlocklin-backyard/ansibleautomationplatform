@@ -1,6 +1,6 @@
 ---
 - name: Apache server installed
-  hosts: myhosts
+  hosts: all
   become: true
   tasks:
   - name: Latest Apache version installed
@@ -13,6 +13,9 @@
       enabled: true
       state: started
   - name: Copy web.html
-    ansible.builtin.copy:
-      src: "prod_web.html"
+    ansible.builtin.template:
+      src: "template_web.html.j2"
       dest: /var/www/html/index.html
+#      owner: httpd
+##     group: httpd
+##     mode: '0644'
