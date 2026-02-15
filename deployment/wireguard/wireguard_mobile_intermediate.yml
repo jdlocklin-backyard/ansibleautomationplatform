@@ -303,14 +303,22 @@
                 chmod 600 {{ wg_config_dir }}/clients/{{ wg_client_name }}_preshared.key
               '
 
-        - name: "7c. Read client keys"
+        - name: "7c. Read client private key"
           ansible.builtin.shell:
-            cmd: "pct exec {{ ct_id }} -- cat {{ wg_config_dir }}/clients/{{ wg_client_name }}_{{ item }}.key"
-          loop:
-            - private
-            - public
-            - preshared
-          register: client_keys
+            cmd: "pct exec {{ ct_id }} -- cat {{ wg_config_dir }}/clients/{{ wg_client_name }}_private.key"
+          register: client_private_key
+          changed_when: false
+
+        - name: "7d. Read client public key"
+          ansible.builtin.shell:
+            cmd: "pct exec {{ ct_id }} -- cat {{ wg_config_dir }}/clients/{{ wg_client_name }}_public.key"
+          register: client_public_key
+          changed_when: false
+
+        - name: "7e. Read client preshared key"
+          ansible.builtin.shell:
+            cmd: "pct exec {{ ct_id }} -- cat {{ wg_config_dir }}/clients/{{ wg_client_name }}_preshared.key"
+          register: client_preshared_key
           changed_when: false
 
     # =========================================================================
@@ -336,11 +344,12 @@
     # =========================================================================
     - name: "9. Set key facts for config generation"
       ansible.builtin.set_fact:
-        _server_privkey: "{{ server_private_key.stdout | trim }}"
-        _server_pubkey: "{{ server_public_key.stdout | trim }}"
-        _client_privkey: "{{ client_keys.results[0].stdout | trim }}"
-        _client_pubkey: "{{ client_keys.results[1].stdout | trim }}"
-        _client_psk: "{{ client_keys.results[2].stdout | trim }}"
+        _server_privkey: "{{ server_private_key.stdout | default('') | trim }}"
+        _server_pubkey: "{{ server_public_key.stdout | default('') | trim }}"
+        _client_privkey: "{{ client_private_key.stdout | default('') | trim }}"
+        _client_pubkey: "{{ client_public_key.stdout | default('') | trim }}"
+        _client_psk: "{{ client_preshared_key.stdout | default('') | trim }}"
+      when: server_private_key is not skipped and client_private_key is not skipped
 
     - name: "10. Write server configuration (wg0.conf)"
       when: wg_regenerate_server
