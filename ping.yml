@@ -1,6 +1,6 @@
 ---
 - name: Test connectivity to Hosts
-  hosts: myhosts
+  hosts: all
   gather_facts: false
   become: true
   tasks:
