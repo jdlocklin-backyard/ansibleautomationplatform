@@ -60,7 +60,8 @@ ansible-playbook deployment/webserver/apache_install_simple.yml
 
 ---
 
-## 📖 AAP Documentation
+## 📖 Documentation
+- **[Playbook Testing Checklist](PLAYBOOK_CHECKLIST.md)** - Current testing progress and status ⭐
 - [AAP Configuration Order & Refresh Guide](AAP_CONFIGURATION_ORDER.md)
 - [AAP GUI Setup Guide](AAP_SETUP_GUIDE.md)
 - [AAP GUI Quick Reference](AAP_GUI_QUICKSTART.md)
@@ -71,12 +72,20 @@ ansible-playbook deployment/webserver/apache_install_simple.yml
 
 **File:** `inventory_homelab.ini`
 
+**Hosts:**
+- **ansible1** - 10.0.0.116 (Ubuntu) - Control node ⚠️ Has broken kubic apt repository
+- **ansible2** - 10.0.0.168 (Ubuntu) - Managed node
+- **ansible3** - 10.0.0.194 (Ubuntu) - Managed node
+- **ansible5** - 10.0.0.42 (RHEL 8.10) - AAP Control Node ⭐ Primary testing location
+
 **Groups:**
-- `ansible_control` - ansible1 (10.0.0.116)
+- `ansible_control` - ansible1
 - `ansible_nodes` - ansible2, ansible3, ansible5
-- `homelab` - All hosts
+- `homelab` - All hosts (children of above)
 
 **All playbooks target:** `hosts: all`
+
+**Testing Location:** SSH to ansible5 (`ssh root@10.0.0.42`), clone repo to `/root/ansibleautomationplatform`
 
 ---
 
@@ -108,5 +117,16 @@ Playbooks follow: `<descriptive_name>_<complexity>.yml`
 
 ---
 
-**Repository Version:** 2.0 - Reorganized Structure  
-**Last Updated:** February 14, 2026
+## 🧪 Current Testing Status
+
+**Phase:** Reorganization and Testing  
+**Progress:** 2/27 playbooks tested (diagnostics complete)  
+**Latest:** Fixed apt cache handling for Apache installation  
+**Next:** Test apache_install_simple.yml with new error handling
+
+See **[PLAYBOOK_CHECKLIST.md](PLAYBOOK_CHECKLIST.md)** for detailed testing progress.
+
+---
+
+**Repository Version:** 2.1 - Testing in Progress  
+**Last Updated:** February 15, 2026
