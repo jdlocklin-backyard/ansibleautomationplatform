@@ -1,0 +1,543 @@
+---
+# =============================================================================
+# WIREGUARD MOBILE ACCESS PLAYBOOK
+# =============================================================================
+# Reconfigures the existing WireGuard LXC container (CT 4000) for mobile
+# access to your homelab from anywhere.
+#
+# WHAT THIS PLAYBOOK DOES:
+#   1. Migrates CT 4000 from old network (192.168.1.x) to new (10.0.0.x)
+#   2. Installs/configures WireGuard server inside the container
+#   3. Generates server + mobile client key pairs
+#   4. Creates a QR code you scan with the WireGuard app on your phone
+#   5. Sets up firewall rules for NAT (so your phone can reach the LAN)
+#   6. Optionally sets up DDNS for a stable public hostname
+#
+# SECURITY MODEL:
+#   - WireGuard uses Curve25519 public-key cryptography
+#   - The server port (51820/UDP) is cryptographically silent to scanners
+#   - Only devices with a valid private key + allowed IP can connect
+#   - No TLS, no certificates, no CAs to manage - just key pairs
+#   - This is the most secure consumer VPN protocol available
+#
+# PREREQUISITES:
+#   - CT 4000 must exist and be running on the Proxmox host
+#   - Run this playbook directly on the Proxmox host
+#   - Router port forward: UDP 51820 -> 10.0.0.150 (after playbook runs)
+#   - Know your public IP or have a DDNS hostname
+#
+# RUN THIS PLAYBOOK:
+#   ansible-playbook deployment/wireguard/wireguard_mobile_intermediate.yml
+#
+# WITH YOUR PUBLIC IP:
+#   ansible-playbook deployment/wireguard/wireguard_mobile_intermediate.yml \
+#     -e "wg_endpoint=your-public-ip-or-ddns.example.com"
+#
+# TO ADD MORE MOBILE CLIENTS:
+#   ansible-playbook deployment/wireguard/wireguard_mobile_intermediate.yml \
+#     -e "wg_client_name=ipad wg_client_ip=10.100.0.3/32 wg_regenerate_server=false"
+# =============================================================================
+
+- name: WireGuard - Configure Mobile VPN Access
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  become: true
+
+  vars:
+    # =========================================================================
+    # CONTAINER IDENTITY
+    # =========================================================================
+    ct_id: 4000
+
+    # =========================================================================
+    # NETWORK MIGRATION (old -> new)
+    # =========================================================================
+    # New static IP for the WireGuard container on your 10.0.0.x network
+    wg_container_ip: "10.0.0.150"
+    wg_container_cidr: "24"
+    wg_container_gw: "10.0.0.1"
+    wg_container_dns: "1.1.1.1"
+
+    # =========================================================================
+    # WIREGUARD SERVER
+    # =========================================================================
+    # Port WireGuard listens on (UDP) - must be port-forwarded on your router
+    wg_port: 51820
+
+    # Your public IP or DDNS hostname - your phone connects to this
+    # IMPORTANT: Override this with -e "wg_endpoint=YOUR_PUBLIC_IP"
+    # If you don't know it, run: curl -s ifconfig.me
+    wg_endpoint: "YOUR_PUBLIC_IP_OR_DDNS"
+
+    # WireGuard tunnel subnet (internal VPN addressing)
+    # Server gets .1, clients get .2, .3, etc.
+    wg_tunnel_subnet: "10.100.0.0/24"
+    wg_server_tunnel_ip: "10.100.0.1/24"
+
+    # DNS the mobile client uses while connected (Cloudflare)
+    wg_client_dns: "1.1.1.1, 1.0.0.1"
+
+    # =========================================================================
+    # MOBILE CLIENT CONFIGURATION
+    # =========================================================================
+    wg_client_name: "mobile"
+    wg_client_ip: "10.100.0.2/32"
+
+    # What traffic goes through the VPN
+    # 0.0.0.0/0 = ALL traffic (full tunnel - most secure for public wifi)
+    # 10.0.0.0/24 = Only homelab traffic (split tunnel - saves mobile data)
+    wg_client_allowed_ips: "0.0.0.0/0"
+
+    # =========================================================================
+    # HOMELAB LAN ACCESS
+    # =========================================================================
+    # Your homelab network that the mobile client should be able to reach
+    wg_lan_subnet: "10.0.0.0/24"
+
+    # =========================================================================
+    # CONTROL FLAGS
+    # =========================================================================
+    # Set to false when adding additional clients to skip server reconfiguration
+    wg_regenerate_server: true
+
+    # Whether to stop Docker-based WireGuard (wg-easy) if found
+    wg_remove_docker: true
+
+    # =========================================================================
+    # KEY STORAGE
+    # =========================================================================
+    # Keys are stored inside the container at this path
+    wg_config_dir: "/etc/wireguard"
+
+  tasks:
+
+    # =========================================================================
+    # PHASE 1: PREFLIGHT CHECKS
+    # =========================================================================
+    - name: "1. Display configuration plan"
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  WireGuard Mobile VPN Configuration"
+          - "============================================"
+          - "  Container:    CT {{ ct_id }}"
+          - "  New IP:       {{ wg_container_ip }}/{{ wg_container_cidr }}"
+          - "  WG Port:      {{ wg_port }}/UDP"
+          - "  Endpoint:     {{ wg_endpoint }}:{{ wg_port }}"
+          - "  Tunnel Net:   {{ wg_tunnel_subnet }}"
+          - "  Server VPN:   {{ wg_server_tunnel_ip }}"
+          - "  Client Name:  {{ wg_client_name }}"
+          - "  Client VPN:   {{ wg_client_ip }}"
+          - "  Client Route: {{ wg_client_allowed_ips }}"
+          - "  LAN Access:   {{ wg_lan_subnet }}"
+          - "============================================"
+
+    - name: "2. Verify container exists and is running"
+      ansible.builtin.command:
+        cmd: "pct status {{ ct_id }}"
+      register: ct_status
+      changed_when: false
+
+    - name: "2b. Fail if container is not running"
+      ansible.builtin.fail:
+        msg: "Container {{ ct_id }} is not running: {{ ct_status.stdout }}. Start it: pct start {{ ct_id }}"
+      when: "'running' not in ct_status.stdout"
+
+    - name: "2c. Warn about endpoint placeholder"
+      ansible.builtin.debug:
+        msg: |
+          ⚠️  WARNING: wg_endpoint is set to 'YOUR_PUBLIC_IP_OR_DDNS'
+          You MUST override this with your actual public IP or DDNS hostname:
+            -e "wg_endpoint=$(curl -s ifconfig.me)"
+          The client config will be generated but won't work until this is set.
+      when: wg_endpoint == "YOUR_PUBLIC_IP_OR_DDNS"
+
+    # =========================================================================
+    # PHASE 2: NETWORK MIGRATION
+    # =========================================================================
+    - name: "3. Migrate container to new network (10.0.0.x)"
+      when: wg_regenerate_server
+      block:
+        - name: "3a. Stop the container for network change"
+          ansible.builtin.command:
+            cmd: "pct stop {{ ct_id }}"
+          register: stop_result
+          failed_when: false
+
+        - name: "3b. Wait for container to stop"
+          ansible.builtin.command:
+            cmd: "pct status {{ ct_id }}"
+          register: stop_check
+          until: "'stopped' in stop_check.stdout"
+          retries: 10
+          delay: 3
+          changed_when: false
+
+        - name: "3c. Update network configuration to 10.0.0.x"
+          ansible.builtin.command:
+            cmd: >-
+              pct set {{ ct_id }}
+              --net0 name=eth0,bridge=vmbr0,firewall=1,ip={{ wg_container_ip }}/{{ wg_container_cidr }},gw={{ wg_container_gw }},hwaddr=BC:24:11:F5:05:DE
+              --nameserver {{ wg_container_dns }}
+              --searchdomain {{ wg_container_dns }}
+
+        - name: "3d. Start the container with new network"
+          ansible.builtin.command:
+            cmd: "pct start {{ ct_id }}"
+
+        - name: "3e. Wait for container to be running"
+          ansible.builtin.command:
+            cmd: "pct status {{ ct_id }}"
+          register: start_check
+          until: "'running' in start_check.stdout"
+          retries: 15
+          delay: 3
+          changed_when: false
+
+        - name: "3f. Wait for network to come up"
+          ansible.builtin.pause:
+            seconds: 10
+
+        - name: "3g. Verify new IP is active"
+          ansible.builtin.shell:
+            cmd: "pct exec {{ ct_id }} -- hostname -I"
+          register: new_ip
+          changed_when: false
+
+        - name: "3h. Show new IP"
+          ansible.builtin.debug:
+            msg: "Container IP is now: {{ new_ip.stdout | trim }}"
+
+    # =========================================================================
+    # PHASE 3: CLEAN UP OLD DOCKER-BASED WIREGUARD
+    # =========================================================================
+    - name: "4. Remove Docker-based WireGuard (if present)"
+      when: wg_remove_docker and wg_regenerate_server
+      block:
+        - name: "4a. Check if Docker is installed"
+          ansible.builtin.shell:
+            cmd: "pct exec {{ ct_id }} -- which docker 2>/dev/null"
+          register: docker_check
+          failed_when: false
+          changed_when: false
+
+        - name: "4b. Stop Docker WireGuard containers"
+          ansible.builtin.shell:
+            cmd: "pct exec {{ ct_id }} -- bash -c 'docker stop $(docker ps -q) 2>/dev/null; docker system prune -af 2>/dev/null'"
+          when: docker_check.rc == 0
+          failed_when: false
+
+        - name: "4c. Disable Docker service"
+          ansible.builtin.shell:
+            cmd: "pct exec {{ ct_id }} -- bash -c 'systemctl stop docker 2>/dev/null; systemctl disable docker 2>/dev/null'"
+          when: docker_check.rc == 0
+          failed_when: false
+
+    # =========================================================================
+    # PHASE 4: INSTALL WIREGUARD NATIVELY
+    # =========================================================================
+    - name: "5. Install WireGuard and dependencies"
+      when: wg_regenerate_server
+      block:
+        - name: "5a. Update apt and install packages"
+          ansible.builtin.shell:
+            cmd: >-
+              pct exec {{ ct_id }} -- bash -c '
+                apt-get update -qq &&
+                apt-get install -y -qq wireguard wireguard-tools iptables qrencode
+              '
+          register: install_result
+
+        - name: "5b. Enable IP forwarding"
+          ansible.builtin.shell:
+            cmd: >-
+              pct exec {{ ct_id }} -- bash -c '
+                echo "net.ipv4.ip_forward = 1" > /etc/sysctl.d/99-wireguard.conf &&
+                echo "net.ipv6.conf.all.forwarding = 1" >> /etc/sysctl.d/99-wireguard.conf &&
+                sysctl -p /etc/sysctl.d/99-wireguard.conf
+              '
+
+    # =========================================================================
+    # PHASE 5: GENERATE KEYS
+    # =========================================================================
+    - name: "6. Generate WireGuard key pairs"
+      when: wg_regenerate_server
+      block:
+        - name: "6a. Create config directory"
+          ansible.builtin.shell:
+            cmd: "pct exec {{ ct_id }} -- mkdir -p {{ wg_config_dir }}/clients"
+
+        - name: "6b. Generate server private key"
+          ansible.builtin.shell:
+            cmd: "pct exec {{ ct_id }} -- bash -c 'wg genkey | tee {{ wg_config_dir }}/server_private.key | wg pubkey > {{ wg_config_dir }}/server_public.key && chmod 600 {{ wg_config_dir }}/server_private.key'"
+
+        - name: "6c. Read server private key"
+          ansible.builtin.shell:
+            cmd: "pct exec {{ ct_id }} -- cat {{ wg_config_dir }}/server_private.key"
+          register: server_private_key
+          changed_when: false
+
+        - name: "6d. Read server public key"
+          ansible.builtin.shell:
+            cmd: "pct exec {{ ct_id }} -- cat {{ wg_config_dir }}/server_public.key"
+          register: server_public_key
+          changed_when: false
+
+    - name: "7. Generate client key pair ({{ wg_client_name }})"
+      block:
+        - name: "7a. Generate client private key"
+          ansible.builtin.shell:
+            cmd: >-
+              pct exec {{ ct_id }} -- bash -c '
+                wg genkey | tee {{ wg_config_dir }}/clients/{{ wg_client_name }}_private.key |
+                wg pubkey > {{ wg_config_dir }}/clients/{{ wg_client_name }}_public.key &&
+                chmod 600 {{ wg_config_dir }}/clients/{{ wg_client_name }}_private.key
+              '
+
+        - name: "7b. Generate client preshared key (extra layer of security)"
+          ansible.builtin.shell:
+            cmd: >-
+              pct exec {{ ct_id }} -- bash -c '
+                wg genpsk > {{ wg_config_dir }}/clients/{{ wg_client_name }}_preshared.key &&
+                chmod 600 {{ wg_config_dir }}/clients/{{ wg_client_name }}_preshared.key
+              '
+
+        - name: "7c. Read client keys"
+          ansible.builtin.shell:
+            cmd: "pct exec {{ ct_id }} -- cat {{ wg_config_dir }}/clients/{{ wg_client_name }}_{{ item }}.key"
+          loop:
+            - private
+            - public
+            - preshared
+          register: client_keys
+          changed_when: false
+
+    # =========================================================================
+    # PHASE 6: READ KEYS (when not regenerating server)
+    # =========================================================================
+    - name: "8. Read existing server keys (when adding clients)"
+      when: not wg_regenerate_server
+      block:
+        - name: "8a. Read server private key"
+          ansible.builtin.shell:
+            cmd: "pct exec {{ ct_id }} -- cat {{ wg_config_dir }}/server_private.key"
+          register: server_private_key
+          changed_when: false
+
+        - name: "8b. Read server public key"
+          ansible.builtin.shell:
+            cmd: "pct exec {{ ct_id }} -- cat {{ wg_config_dir }}/server_public.key"
+          register: server_public_key
+          changed_when: false
+
+    # =========================================================================
+    # PHASE 7: WRITE SERVER CONFIGURATION
+    # =========================================================================
+    - name: "9. Set key facts for config generation"
+      ansible.builtin.set_fact:
+        _server_privkey: "{{ server_private_key.stdout | trim }}"
+        _server_pubkey: "{{ server_public_key.stdout | trim }}"
+        _client_privkey: "{{ client_keys.results[0].stdout | trim }}"
+        _client_pubkey: "{{ client_keys.results[1].stdout | trim }}"
+        _client_psk: "{{ client_keys.results[2].stdout | trim }}"
+
+    - name: "10. Write server configuration (wg0.conf)"
+      when: wg_regenerate_server
+      ansible.builtin.shell:
+        cmd: |
+          pct exec {{ ct_id }} -- bash -c 'cat > {{ wg_config_dir }}/wg0.conf << WGEOF
+          # =============================================================================
+          # WireGuard Server Configuration
+          # Generated: {{ ansible_date_time.iso8601 }}
+          # Container: CT {{ ct_id }} ({{ wg_container_ip }})
+          # =============================================================================
+
+          [Interface]
+          Address = {{ wg_server_tunnel_ip }}
+          ListenPort = {{ wg_port }}
+          PrivateKey = {{ _server_privkey }}
+
+          # NAT: Allow VPN clients to reach the homelab LAN ({{ wg_lan_subnet }})
+          PostUp = iptables -t nat -A POSTROUTING -s {{ wg_tunnel_subnet }} -o eth0 -j MASQUERADE
+          PostUp = iptables -A FORWARD -i wg0 -j ACCEPT
+          PostUp = iptables -A FORWARD -o wg0 -j ACCEPT
+          PostDown = iptables -t nat -D POSTROUTING -s {{ wg_tunnel_subnet }} -o eth0 -j MASQUERADE
+          PostDown = iptables -D FORWARD -i wg0 -j ACCEPT
+          PostDown = iptables -D FORWARD -o wg0 -j ACCEPT
+
+          # Client: {{ wg_client_name }}
+          [Peer]
+          PublicKey = {{ _client_pubkey }}
+          PresharedKey = {{ _client_psk }}
+          AllowedIPs = {{ wg_client_ip }}
+          WGEOF
+          chmod 600 {{ wg_config_dir }}/wg0.conf'
+
+    - name: "10b. Add peer to existing server config (when adding clients)"
+      when: not wg_regenerate_server
+      ansible.builtin.shell:
+        cmd: |
+          pct exec {{ ct_id }} -- bash -c 'cat >> {{ wg_config_dir }}/wg0.conf << WGEOF
+
+          # Client: {{ wg_client_name }}
+          [Peer]
+          PublicKey = {{ _client_pubkey }}
+          PresharedKey = {{ _client_psk }}
+          AllowedIPs = {{ wg_client_ip }}
+          WGEOF'
+
+    # =========================================================================
+    # PHASE 8: WRITE CLIENT CONFIGURATION
+    # =========================================================================
+    - name: "11. Write client configuration ({{ wg_client_name }}.conf)"
+      ansible.builtin.shell:
+        cmd: |
+          pct exec {{ ct_id }} -- bash -c 'cat > {{ wg_config_dir }}/clients/{{ wg_client_name }}.conf << WGEOF
+          # =============================================================================
+          # WireGuard Client: {{ wg_client_name }}
+          # Generated: {{ ansible_date_time.iso8601 }}
+          # Scan the QR code with the WireGuard app on your phone
+          # =============================================================================
+
+          [Interface]
+          Address = {{ wg_client_ip }}
+          PrivateKey = {{ _client_privkey }}
+          DNS = {{ wg_client_dns }}
+
+          [Peer]
+          PublicKey = {{ _server_pubkey }}
+          PresharedKey = {{ _client_psk }}
+          Endpoint = {{ wg_endpoint }}:{{ wg_port }}
+          AllowedIPs = {{ wg_client_allowed_ips }}
+          PersistentKeepalive = 25
+          WGEOF
+          chmod 600 {{ wg_config_dir }}/clients/{{ wg_client_name }}.conf'
+
+    # =========================================================================
+    # PHASE 9: START WIREGUARD
+    # =========================================================================
+    - name: "12. Enable and start WireGuard service"
+      ansible.builtin.shell:
+        cmd: >-
+          pct exec {{ ct_id }} -- bash -c '
+            systemctl enable wg-quick@wg0 &&
+            systemctl restart wg-quick@wg0
+          '
+
+    - name: "12b. Wait for WireGuard to start"
+      ansible.builtin.pause:
+        seconds: 3
+
+    - name: "12c. Verify WireGuard is running"
+      ansible.builtin.shell:
+        cmd: "pct exec {{ ct_id }} -- wg show"
+      register: wg_status
+      changed_when: false
+
+    - name: "12d. Show WireGuard status"
+      ansible.builtin.debug:
+        msg: "{{ wg_status.stdout_lines }}"
+
+    # =========================================================================
+    # PHASE 10: GENERATE QR CODE FOR MOBILE
+    # =========================================================================
+    - name: "13. Generate QR code for {{ wg_client_name }}"
+      ansible.builtin.shell:
+        cmd: "pct exec {{ ct_id }} -- qrencode -t ansiutf8 < {{ wg_config_dir }}/clients/{{ wg_client_name }}.conf"
+      register: qr_code
+      changed_when: false
+
+    - name: "13b. Also save QR code as PNG"
+      ansible.builtin.shell:
+        cmd: "pct exec {{ ct_id }} -- qrencode -o {{ wg_config_dir }}/clients/{{ wg_client_name }}_qr.png < {{ wg_config_dir }}/clients/{{ wg_client_name }}.conf"
+
+    # =========================================================================
+    # PHASE 11: DISPLAY RESULTS
+    # =========================================================================
+    - name: "14. Read client config for display"
+      ansible.builtin.shell:
+        cmd: "pct exec {{ ct_id }} -- cat {{ wg_config_dir }}/clients/{{ wg_client_name }}.conf"
+      register: client_conf
+      changed_when: false
+
+    - name: "============================================"
+      ansible.builtin.debug:
+        msg:
+          - "============================================"
+          - "  WireGuard Configuration Complete!"
+          - "============================================"
+          - ""
+          - "  SERVER"
+          - "  ------"
+          - "  Container:    CT {{ ct_id }}"
+          - "  Container IP: {{ wg_container_ip }}"
+          - "  VPN Tunnel:   {{ wg_server_tunnel_ip }}"
+          - "  Listen Port:  {{ wg_port }}/UDP"
+          - "  Public Key:   {{ _server_pubkey }}"
+          - ""
+          - "  CLIENT: {{ wg_client_name }}"
+          - "  ------"
+          - "  VPN IP:       {{ wg_client_ip }}"
+          - "  Endpoint:     {{ wg_endpoint }}:{{ wg_port }}"
+          - "  Routing:      {{ wg_client_allowed_ips }}"
+          - ""
+          - "============================================"
+          - "  SETUP YOUR PHONE"
+          - "============================================"
+          - ""
+          - "  1. Install 'WireGuard' app from App Store / Play Store"
+          - ""
+          - "  2. Scan the QR code below:"
+          - ""
+
+    - name: "📱 SCAN THIS QR CODE WITH WIREGUARD APP"
+      ansible.builtin.debug:
+        msg: "{{ qr_code.stdout }}"
+
+    - name: "CLIENT CONFIGURATION FILE (for manual import)"
+      ansible.builtin.debug:
+        msg: "{{ client_conf.stdout_lines }}"
+
+    - name: "============================================"
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "============================================"
+          - "  ROUTER CONFIGURATION REQUIRED"
+          - "============================================"
+          - ""
+          - "  You MUST forward this port on your router:"
+          - ""
+          - "    Protocol: UDP"
+          - "    External Port: {{ wg_port }}"
+          - "    Internal IP: {{ wg_container_ip }}"
+          - "    Internal Port: {{ wg_port }}"
+          - ""
+          - "  Router admin: http://{{ wg_container_gw }}"
+          - ""
+          - "============================================"
+          - "  USEFUL COMMANDS"
+          - "============================================"
+          - ""
+          - "  Check status:     pct exec {{ ct_id }} -- wg show"
+          - "  View server conf: pct exec {{ ct_id }} -- cat {{ wg_config_dir }}/wg0.conf"
+          - "  View client conf: pct exec {{ ct_id }} -- cat {{ wg_config_dir }}/clients/{{ wg_client_name }}.conf"
+          - "  Show QR again:    pct exec {{ ct_id }} -- qrencode -t ansiutf8 < {{ wg_config_dir }}/clients/{{ wg_client_name }}.conf"
+          - "  Restart WG:       pct exec {{ ct_id }} -- systemctl restart wg-quick@wg0"
+          - ""
+          - "  ADD ANOTHER DEVICE:"
+          - "    ansible-playbook deployment/wireguard/wireguard_mobile_intermediate.yml \\"
+          - "      -e \"wg_client_name=tablet wg_client_ip=10.100.0.3/32 wg_regenerate_server=false\""
+          - ""
+          - "============================================"
+          - "  WHAT YOUR PHONE CAN REACH (when connected)"
+          - "============================================"
+          - ""
+          - "  Proxmox:       https://10.0.0.130:8006"
+          - "  Ansible AAP:   https://10.0.0.42:443"
+          - "  All VMs:       10.0.0.x"
+          - "  All Containers: 10.0.0.x"
+          - "  Internet:      {{ 'Through your home IP (full tunnel)' if wg_client_allowed_ips == '0.0.0.0/0' else 'Direct from phone (split tunnel)' }}"
+          - ""
+          - "============================================"
