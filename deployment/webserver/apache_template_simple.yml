@@ -3,19 +3,35 @@
   hosts: all
   become: true
   tasks:
-  - name: Latest Apache version installed
-    ansible.builtin.package:
+  - name: Latest Apache version installed (Debian/Ubuntu)
+    ansible.builtin.apt:
+      name: apache2
+      state: latest
+      update_cache: yes
+    when: ansible_facts['os_family'] == 'Debian'
+
+  - name: Latest Apache version installed (RHEL/CentOS)
+    ansible.builtin.yum:
       name: httpd
       state: latest
-  - name: Apache enabled and running
+    when: ansible_facts['os_family'] == 'RedHat'
+
+  - name: Apache enabled and running (Debian/Ubuntu)
+    ansible.builtin.service:
+      name: apache2
+      enabled: true
+      state: started
+    when: ansible_facts['os_family'] == 'Debian'
+
+  - name: Apache enabled and running (RHEL/CentOS)
     ansible.builtin.service:
       name: httpd
       enabled: true
       state: started
-  - name: Copy web.html
+    when: ansible_facts['os_family'] == 'RedHat'
+
+  - name: Copy web.html using template
     ansible.builtin.template:
       src: "template_web.html.j2"
       dest: /var/www/html/index.html
-#      owner: httpd
-##     group: httpd
-##     mode: '0644'
+      mode: '0644'

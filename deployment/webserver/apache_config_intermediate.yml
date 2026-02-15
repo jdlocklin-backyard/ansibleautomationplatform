@@ -1,16 +1,31 @@
 ---
-- name: manage httpd.conf
+- name: manage Apache configuration
   hosts: all
   become: true
   tasks:
-  - name: Copy Apache configuration file
-    copy:
+  - name: Copy Apache configuration file (RHEL/CentOS)
+    ansible.builtin.copy:
       src: httpd.conf
-      dest: /etc/httpd/conf/
+      dest: /etc/httpd/conf/httpd.conf
+    when: ansible_facts['os_family'] == 'RedHat'
     notify:
-      - restart_apache
+      - restart_apache_rhel
+
+  - name: Copy Apache configuration file (Debian/Ubuntu)
+    ansible.builtin.copy:
+      src: httpd.conf
+      dest: /etc/apache2/apache2.conf
+    when: ansible_facts['os_family'] == 'Debian'
+    notify:
+      - restart_apache_debian
+
   handlers:
-    - name: restart_apache
-      service:
+    - name: restart_apache_rhel
+      ansible.builtin.service:
         name: httpd
+        state: restarted
+
+    - name: restart_apache_debian
+      ansible.builtin.service:
+        name: apache2
         state: restarted
