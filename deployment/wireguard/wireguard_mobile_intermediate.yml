@@ -349,7 +349,6 @@
         _client_privkey: "{{ client_private_key.stdout | default('') | trim }}"
         _client_pubkey: "{{ client_public_key.stdout | default('') | trim }}"
         _client_psk: "{{ client_preshared_key.stdout | default('') | trim }}"
-      when: server_private_key is not skipped and client_private_key is not skipped
 
     - name: "10. Write server configuration (wg0.conf)"
       when: wg_regenerate_server
